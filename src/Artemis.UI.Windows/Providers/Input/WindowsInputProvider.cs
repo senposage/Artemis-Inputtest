@@ -50,8 +50,8 @@ public class WindowsInputProvider : InputProvider
         nint newLong = Marshal.GetFunctionPointerForDelegate(_fnWndProcHook);
         User32.SetWindowLongPtr(_hWnd, GWL_WNDPROC, newLong);
 
-        RawInputDevice.RegisterDevice(HidUsageAndPage.Keyboard, RawInputDeviceFlags.InputSink, _hWnd);
-        RawInputDevice.RegisterDevice(HidUsageAndPage.Mouse, RawInputDeviceFlags.InputSink, _hWnd);
+        RawInputDevice.RegisterDevice(HidUsageAndPage.Keyboard, RawInputDeviceFlags.None, _hWnd);
+        RawInputDevice.RegisterDevice(HidUsageAndPage.Mouse, RawInputDeviceFlags.None, _hWnd);
     }
 
     public static Guid Id { get; } = new("6737b204-ffb1-4cd9-8776-9fb851db303a");
