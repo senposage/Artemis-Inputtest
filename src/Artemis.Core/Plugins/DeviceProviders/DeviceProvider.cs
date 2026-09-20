@@ -17,6 +17,17 @@ public abstract class DeviceProvider : PluginFeature
     public abstract IRGBDeviceProvider RgbDeviceProvider { get; }
 
     /// <summary>
+    ///     Returns the persistent identifier Artemis uses to associate a physical device with its settings and profile LEDs.
+    ///     Providers that can expose a serial number, hardware path, network address, or another stable instance identifier
+    ///     should override this method. The returned value must remain stable across provider and application restarts.
+    /// </summary>
+    /// <param name="device">The RGB.NET device to identify.</param>
+    public virtual string GetDeviceIdentifier(IRGBDevice device)
+    {
+        return device.GetDeviceIdentifier();
+    }
+
+    /// <summary>
     ///     A boolean indicating whether this device provider detects the physical layout of connected keyboards.
     ///     <para>
     ///         Note: <see cref="GetLogicalLayout" /> is only called when this or <see cref="CanDetectLogicalLayout" />

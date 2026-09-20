@@ -17,6 +17,7 @@
     <ItemGroup>
         <!--Used to embed the above PluginApiVersion property into the assembly as metadata-->
         <AssemblyMetadata Include="PluginApiVersion" Value="$(PluginApiVersion)" />
+        <InternalsVisibleTo Include="Artemis.Core.Tests" />
     </ItemGroup>
 
     <ItemGroup>

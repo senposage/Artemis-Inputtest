@@ -184,6 +184,17 @@ internal class RenderService : IRenderService, IRenderer, IDisposable
         _surfaceManager.RemoveDevices(new List<ArtemisDevice> {e.Device});
     }
 
+    private void DeviceServiceOnDeviceDisconnected(object? sender, DeviceEventArgs e)
+    {
+        _surfaceManager.RemoveDevices(new List<ArtemisDevice> {e.Device});
+    }
+
+    private void DeviceServiceOnDeviceReconnected(object? sender, DeviceEventArgs e)
+    {
+        if (e.Device.IsEnabled)
+            _surfaceManager.AddDevices(new List<ArtemisDevice> {e.Device});
+    }
+
     private void OnRenderSettingsChanged(object? sender, EventArgs e)
     {
         _surfaceManager.UpdateTargetFrameRate(_targetFrameRateSetting.Value);
@@ -232,6 +243,8 @@ internal class RenderService : IRenderService, IRenderer, IDisposable
         _deviceService.DeviceProviderRemoved += DeviceServiceOnDeviceProviderRemoved;
         _deviceService.DeviceEnabled += DeviceServiceOnDeviceEnabled;
         _deviceService.DeviceDisabled += DeviceServiceOnDeviceDisabled;
+        _deviceService.DeviceDisconnected += DeviceServiceOnDeviceDisconnected;
+        _deviceService.DeviceReconnected += DeviceServiceOnDeviceReconnected;
         
         IsPaused = false;
         _initialized = true;

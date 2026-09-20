@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using Artemis.Storage.Entities.Surface;
 using Artemis.Storage.Repositories.Interfaces;
+using Microsoft.EntityFrameworkCore;
 
 namespace Artemis.Storage.Repositories;
 
@@ -26,6 +27,18 @@ internal class DeviceRepository(Func<ArtemisDbContext> getContext) : IDeviceRepo
     {
         using ArtemisDbContext dbContext = getContext();
         return dbContext.Devices.FirstOrDefault(d => d.Id == id);
+    }
+
+    public DeviceEntity? Rename(string oldId, string newId)
+    {
+        using ArtemisDbContext dbContext = getContext();
+        if (dbContext.Devices.Any(d => d.Id == newId))
+            return dbContext.Devices.First(d => d.Id == newId);
+
+        int updated = dbContext.Devices
+            .Where(d => d.Id == oldId)
+            .ExecuteUpdate(setters => setters.SetProperty(d => d.Id, newId));
+        return updated == 0 ? null : dbContext.Devices.First(d => d.Id == newId);
     }
 
     public List<DeviceEntity> GetAll()

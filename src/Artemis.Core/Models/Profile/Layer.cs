@@ -802,15 +802,19 @@ public sealed class Layer : RenderProfileElement
             throw new ObjectDisposedException("Layer");
 
         List<ArtemisLed> leds = [];
+        _missingLeds.Clear();
 
         // Get the surface LEDs for this layer
         List<ArtemisLed> availableLeds = devices.SelectMany(d => d.Leds).ToList();
         foreach (LedEntity ledEntity in LayerEntity.Leds)
         {
-            ArtemisLed? match = availableLeds.FirstOrDefault(a => a.Device.Identifier == ledEntity.DeviceIdentifier &&
+            ArtemisLed? match = availableLeds.FirstOrDefault(a => a.Device.MatchesIdentifier(ledEntity.DeviceIdentifier) &&
                                                                   a.RgbLed.Id.ToString() == ledEntity.LedName);
             if (match != null && !leds.Contains(match))
+            {
                 leds.Add(match);
+                availableLeds.Remove(match);
+            }
             else
                 _missingLeds.Add(ledEntity);
         }

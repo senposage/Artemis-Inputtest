@@ -17,8 +17,9 @@ namespace Artemis.Core;
 /// </summary>
 public class ArtemisDevice : CorePropertyChanged
 {
-    private readonly List<OriginalLed> _originalLeds;
-    private readonly Size _originalSize;
+    private readonly HashSet<string> _identifierAliases = [];
+    private List<OriginalLed> _originalLeds;
+    private Size _originalSize;
     private SKPath? _path;
     private SKRect _rectangle;
 
@@ -29,7 +30,7 @@ public class ArtemisDevice : CorePropertyChanged
         _originalSize = rgbDevice.Size;
 
         RgbDevice = rgbDevice;
-        Identifier = rgbDevice.GetDeviceIdentifier();
+        Identifier = deviceProvider.GetDeviceIdentifier(rgbDevice);
         DeviceEntity = new DeviceEntity();
         DeviceProvider = deviceProvider;
 
@@ -66,7 +67,7 @@ public class ArtemisDevice : CorePropertyChanged
         _originalSize = rgbDevice.Size;
 
         RgbDevice = rgbDevice;
-        Identifier = rgbDevice.GetDeviceIdentifier();
+        Identifier = deviceProvider.GetDeviceIdentifier(rgbDevice);
         DeviceEntity = deviceEntity;
         DeviceProvider = deviceProvider;
 
@@ -97,6 +98,14 @@ public class ArtemisDevice : CorePropertyChanged
     public string Identifier { get; }
 
     /// <summary>
+    ///     Returns whether the identifier is the current persistent identifier or a legacy identifier migrated for this device.
+    /// </summary>
+    public bool MatchesIdentifier(string identifier)
+    {
+        return Identifier == identifier || _identifierAliases.Contains(identifier);
+    }
+
+    /// <summary>
     ///     Gets the rectangle covering the device
     /// </summary>
     public SKRect Rectangle
@@ -117,7 +126,12 @@ public class ArtemisDevice : CorePropertyChanged
     /// <summary>
     ///     Gets the RGB.NET device backing this Artemis device
     /// </summary>
-    public IRGBDevice RgbDevice { get; }
+    public IRGBDevice RgbDevice { get; private set; }
+
+    /// <summary>
+    ///     Gets whether the provider currently has a live backing device for this logical Artemis device.
+    /// </summary>
+    public bool IsConnected { get; private set; } = true;
 
     /// <summary>
     ///     Gets the device type of the ArtemisDevice
@@ -127,7 +141,7 @@ public class ArtemisDevice : CorePropertyChanged
     /// <summary>
     ///     Gets the device provider that provided this device
     /// </summary>
-    public DeviceProvider DeviceProvider { get; }
+    public DeviceProvider DeviceProvider { get; private set; }
 
     /// <summary>
     ///     Gets a read only collection containing the LEDs of this device
@@ -483,6 +497,87 @@ public class ArtemisDevice : CorePropertyChanged
 
         DeviceEntity.LayoutType = LayoutSelection.Type;
         DeviceEntity.LayoutParameter = LayoutSelection.Parameter;
+    }
+
+    internal void Disconnect()
+    {
+        if (!IsConnected)
+            return;
+
+        IsConnected = false;
+        OnPropertyChanged(nameof(IsConnected));
+    }
+
+    internal void AddIdentifierAlias(string identifier)
+    {
+        if (identifier != Identifier)
+            _identifierAliases.Add(identifier);
+    }
+
+    /// <summary>
+    /// Replaces the RGB.NET object underneath this logical device while retaining the Artemis device and LED objects
+    /// referenced by profiles. Returns <see langword="true"/> when the LED topology could be rebound in place.
+    /// </summary>
+    internal bool Rebind(IRGBDevice rgbDevice, DeviceProvider? deviceProvider = null)
+    {
+        rgbDevice.EnsureValidDimensions();
+
+        IRGBDevice previousDevice = RgbDevice;
+        previousDevice.PropertyChanged -= RgbDeviceOnPropertyChanged;
+
+        _originalLeds = rgbDevice.Select(l => new OriginalLed(l)).ToList();
+        _originalSize = rgbDevice.Size;
+        RgbDevice = rgbDevice;
+        if (deviceProvider != null)
+            DeviceProvider = deviceProvider;
+
+        RgbDevice.ColorCorrections.Clear();
+        RgbDevice.ColorCorrections.Add(new ScaleColorCorrection(this));
+
+        // Reapply the selected layout to the replacement RGB.NET object before matching LEDs.
+        ArtemisLayout? layout = Layout;
+        if (layout != null && layout.IsValid)
+        {
+            bool createMissingLeds = !layout.IsDefaultLayout && DeviceProvider.CreateMissingLedsSupported;
+            bool removeExcessiveLeds = !layout.IsDefaultLayout && DeviceProvider.RemoveExcessiveLedsSupported;
+            layout.ApplyToDevice(RgbDevice, createMissingLeds, removeExcessiveLeds);
+            Layout = layout;
+        }
+
+        Dictionary<LedId, ArtemisLed> existingLeds = Leds.ToDictionary(l => l.RgbLed.Id);
+        bool topologyPreserved = RgbDevice.Count() == existingLeds.Count && RgbDevice.All(l => existingLeds.ContainsKey(l.Id));
+
+        // Reconcile by LED ID even when the topology changed. Profiles and layers hold direct
+        // references to ArtemisLed instances, so replacing the entire collection because one
+        // LED appeared or disappeared needlessly invalidates every surviving binding.
+        List<ArtemisLed> reconciledLeds = [];
+        foreach (Led replacementLed in RgbDevice)
+        {
+            if (existingLeds.TryGetValue(replacementLed.Id, out ArtemisLed? retainedLed))
+            {
+                retainedLed.Rebind(replacementLed);
+                reconciledLeds.Add(retainedLed);
+            }
+            else
+                reconciledLeds.Add(new ArtemisLed(replacementLed, this));
+        }
+
+        Leds = reconciledLeds.AsReadOnly();
+        LedIds = new ReadOnlyDictionary<LedId, ArtemisLed>(Leds.ToDictionary(l => l.RgbLed.Id, l => l));
+        LoadInputMappings();
+
+        RgbDevice.PropertyChanged += RgbDeviceOnPropertyChanged;
+        IsConnected = true;
+        OnPropertyChanged(nameof(RgbDevice));
+        OnPropertyChanged(nameof(DeviceType));
+        OnPropertyChanged(nameof(IsConnected));
+
+        RgbDevice.Rotation = DeviceEntity.Rotation;
+        RgbDevice.Scale = DeviceEntity.Scale;
+        ApplyLocation(DeviceEntity.X, DeviceEntity.Y);
+        ApplyKeyboardLayout();
+        CalculateRenderProperties();
+        return topologyPreserved;
     }
 
     internal void Load()

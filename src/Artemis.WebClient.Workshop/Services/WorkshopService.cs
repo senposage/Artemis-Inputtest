@@ -317,15 +317,12 @@ public class WorkshopService : IWorkshopService
 
     private void RemoveOrphanedDirectory(string directory)
     {
-        _logger.Information("Removing orphaned workshop entry at {Directory}", directory);
-        try
-        {
-            Directory.Delete(directory, true);
-        }
-        catch (Exception e)
-        {
-            _logger.Warning(e, "Failed to remove orphaned workshop entry at {Directory}", directory);
-        }
+        // The database and workshop files are backed up/restored independently. A
+        // temporarily older or damaged database must not cause Artemis to permanently
+        // delete otherwise valid plugins, profiles, or layouts on the next startup.
+        // Unregistered directories are harmless because only database-backed entries
+        // are loaded; leave them in place so a later database restore can recover them.
+        _logger.Warning("Preserving unregistered workshop directory at {Directory}; it is not active but may belong to another database backup", directory);
     }
 
     private async Task MigrateBuiltInPlugins()

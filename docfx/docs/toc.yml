@@ -2,3 +2,5 @@
   href: introduction.md
 - name: Getting Started
   href: getting-started.md
+- name: Device Provider Lifecycle
+  href: device-provider-lifecycle.md

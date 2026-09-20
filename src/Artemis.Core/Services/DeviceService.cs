@@ -22,8 +22,13 @@ internal class DeviceService : IDeviceService
     private readonly Func<List<ILayoutProvider>> _getLayoutProviders;
     private readonly List<ArtemisDevice> _enabledDevices = [];
     private readonly List<ArtemisDevice> _devices = [];
+    private readonly object _devicesLock = new();
+    private readonly Dictionary<DeviceProvider, (IRGBDeviceProvider Provider, EventHandler<DevicesChangedEventArgs> Handler)> _devicesChangedHandlers = [];
+    private readonly object _deviceChangeLock = new();
     private readonly List<DeviceProvider> _suspendedDeviceProviders = [];
     private readonly object _suspensionLock = new();
+    private volatile IReadOnlyCollection<ArtemisDevice> _enabledDevicesSnapshot = [];
+    private volatile IReadOnlyCollection<ArtemisDevice> _devicesSnapshot = [];
 
     public DeviceService(ILogger logger,
         IPluginManagementService pluginManagementService,
@@ -38,15 +43,12 @@ internal class DeviceService : IDeviceService
         _getLayoutProviders = getLayoutProviders;
 
         SuspendedDeviceProviders = new ReadOnlyCollection<DeviceProvider>(_suspendedDeviceProviders);
-        EnabledDevices = new ReadOnlyCollection<ArtemisDevice>(_enabledDevices);
-        Devices = new ReadOnlyCollection<ArtemisDevice>(_devices);
-
         RenderScale.RenderScaleMultiplierChanged += RenderScaleOnRenderScaleMultiplierChanged;
     }
 
     public IReadOnlyCollection<DeviceProvider> SuspendedDeviceProviders { get; }
-    public IReadOnlyCollection<ArtemisDevice> EnabledDevices { get; }
-    public IReadOnlyCollection<ArtemisDevice> Devices { get; }
+    public IReadOnlyCollection<ArtemisDevice> EnabledDevices => _enabledDevicesSnapshot;
+    public IReadOnlyCollection<ArtemisDevice> Devices => _devicesSnapshot;
 
     /// <inheritdoc />
     public void IdentifyDevice(ArtemisDevice device)
@@ -62,15 +64,7 @@ internal class DeviceService : IDeviceService
 
         try
         {
-            // Can't see why this would happen, RgbService used to do this though
-            List<ArtemisDevice> toRemove = _devices.Where(a => a.DeviceProvider.Id == deviceProvider.Id).ToList();
-            _logger.Verbose("[AddDeviceProvider] Removing {Count} old device(s)", toRemove.Count);
-            foreach (ArtemisDevice device in toRemove)
-            {
-                _devices.Remove(device);
-                _enabledDevices.Remove(device);
-                OnDeviceRemoved(new DeviceEventArgs(device));
-            }
+            UnsubscribeFromDevicesChanged(deviceProvider);
 
             List<Exception> providerExceptions = [];
 
@@ -84,13 +78,21 @@ internal class DeviceService : IDeviceService
 
             _logger.Verbose("[AddDeviceProvider] Initializing device provider");
             rgbDeviceProvider.Exception += DeviceProviderOnException;
-            rgbDeviceProvider.Initialize();
+            try
+            {
+                rgbDeviceProvider.Initialize();
+            }
+            finally
+            {
+                rgbDeviceProvider.Exception -= DeviceProviderOnException;
+            }
             _logger.Verbose("[AddDeviceProvider] Attaching devices of device provider");
-            rgbDeviceProvider.Exception -= DeviceProviderOnException;
             if (providerExceptions.Count == 1)
                 throw new ArtemisPluginException("RGB.NET threw exception: " + providerExceptions.First().Message, providerExceptions.First());
             if (providerExceptions.Count > 1)
                 throw new ArtemisPluginException("RGB.NET threw multiple exceptions", new AggregateException(providerExceptions));
+
+            SubscribeToDevicesChanged(deviceProvider, rgbDeviceProvider);
 
             if (!rgbDeviceProvider.Devices.Any())
             {
@@ -99,25 +101,50 @@ internal class DeviceService : IDeviceService
             }
 
             List<ArtemisDevice> addedDevices = [];
+            List<(ArtemisDevice Device, bool TopologyPreserved)> reconnectedDevices = [];
             foreach (IRGBDevice rgbDevice in rgbDeviceProvider.Devices)
             {
-                ArtemisDevice artemisDevice = GetArtemisDevice(rgbDevice);
-                addedDevices.Add(artemisDevice);
-                _devices.Add(artemisDevice);
-                if (artemisDevice.IsEnabled)
-                    _enabledDevices.Add(artemisDevice);
+                string identifier = deviceProvider.GetDeviceIdentifier(rgbDevice);
+                ArtemisDevice? retained;
+                lock (_devicesLock)
+                    retained = _devices.FirstOrDefault(d => IsSameProvider(d.DeviceProvider, deviceProvider) &&
+                                                            d.Identifier == identifier);
 
+                if (retained != null)
+                {
+                    if (retained.IsConnected && !ReferenceEquals(retained.RgbDevice, rgbDevice))
+                    {
+                        OnDeviceDisconnected(new DeviceEventArgs(retained));
+                        retained.Disconnect();
+                    }
+                    reconnectedDevices.Add((retained, retained.Rebind(rgbDevice, deviceProvider)));
+                }
+                else
+                    addedDevices.Add(GetArtemisDevice(rgbDevice, deviceProvider));
                 _logger.Debug("Device provider {deviceProvider} added {deviceName}", deviceProvider.GetType().Name, rgbDevice.DeviceInfo.DeviceName);
             }
 
-            _devices.Sort((a, b) => a.ZIndex - b.ZIndex);
-            _enabledDevices.Sort((a, b) => a.ZIndex - b.ZIndex);
+            lock (_devicesLock)
+            {
+                _devices.AddRange(addedDevices);
+                _enabledDevices.AddRange(addedDevices.Where(d => d.IsEnabled));
+                _devices.Sort((a, b) => a.ZIndex - b.ZIndex);
+                _enabledDevices.Sort((a, b) => a.ZIndex - b.ZIndex);
+                UpdateDeviceSnapshots();
+            }
 
             OnDeviceProviderAdded(new DeviceProviderEventArgs(deviceProvider, addedDevices));
             foreach (ArtemisDevice artemisDevice in addedDevices)
                 OnDeviceAdded(new DeviceEventArgs(artemisDevice));
+            foreach ((ArtemisDevice device, bool topologyPreserved) in reconnectedDevices)
+            {
+                OnDeviceReconnected(new DeviceEventArgs(device));
+                _logger.Information("Device provider {DeviceProvider} rebound {Device} to retained Artemis identity {Identifier} after provider reload (LED topology preserved: {TopologyPreserved})",
+                    deviceProvider.GetType().Name, device.RgbDevice.DeviceInfo.DeviceName, device.Identifier, topologyPreserved);
+            }
 
-            UpdateLeds();
+            if (addedDevices.Count > 0 || reconnectedDevices.Any(d => !d.TopologyPreserved))
+                UpdateLeds();
         }
         catch (Exception e)
         {
@@ -130,24 +157,25 @@ internal class DeviceService : IDeviceService
     public void RemoveDeviceProvider(DeviceProvider deviceProvider)
     {
         _logger.Verbose("[RemoveDeviceProvider] Pausing rendering to remove {DeviceProvider}", deviceProvider.GetType().Name);
-        List<ArtemisDevice> toRemove = _devices.Where(a => a.DeviceProvider.Id == deviceProvider.Id).ToList();
+        List<ArtemisDevice> toDisconnect;
 
         try
         {
-            _logger.Verbose("[RemoveDeviceProvider] Removing {Count} old device(s)", toRemove.Count);
-            foreach (ArtemisDevice device in toRemove)
+            UnsubscribeFromDevicesChanged(deviceProvider);
+            lock (_devicesLock)
+                toDisconnect = _devices.Where(a => ReferenceEquals(a.DeviceProvider, deviceProvider) && a.IsConnected).ToList();
+
+            _logger.Verbose("[RemoveDeviceProvider] Disconnecting {Count} device(s) while retaining their logical identities", toDisconnect.Count);
+            foreach (ArtemisDevice artemisDevice in toDisconnect)
             {
-                _devices.Remove(device);
-                _enabledDevices.Remove(device);
+                OnDeviceDisconnected(new DeviceEventArgs(artemisDevice));
+                artemisDevice.Disconnect();
             }
 
-            _devices.Sort((a, b) => a.ZIndex - b.ZIndex);
-
-            OnDeviceProviderRemoved(new DeviceProviderEventArgs(deviceProvider, toRemove));
-            foreach (ArtemisDevice artemisDevice in toRemove)
-                OnDeviceRemoved(new DeviceEventArgs(artemisDevice));
-
-            UpdateLeds();
+            // Provider removal is no longer device removal. Consumers that care about
+            // provider availability still receive the event, but surface/profile state
+            // stays attached to the retained logical devices.
+            OnDeviceProviderRemoved(new DeviceProviderEventArgs(deviceProvider, []));
         }
         catch (Exception e)
         {
@@ -161,8 +189,9 @@ internal class DeviceService : IDeviceService
     public void AutoArrangeDevices(bool leftHanded)
     {
         SurfaceArrangement surfaceArrangement = SurfaceArrangement.GetDefaultArrangement(leftHanded);
-        surfaceArrangement.Arrange(_devices);
-        foreach (ArtemisDevice artemisDevice in _devices)
+        IReadOnlyCollection<ArtemisDevice> devices = Devices;
+        surfaceArrangement.Arrange(devices.ToList());
+        foreach (ArtemisDevice artemisDevice in devices)
             artemisDevice.ApplyDefaultCategories();
 
         SaveDevices();
@@ -171,11 +200,29 @@ internal class DeviceService : IDeviceService
     /// <inheritdoc />
     public void LoadDeviceLayout(ArtemisDevice device)
     {
-        ILayoutProvider? provider = _getLayoutProviders().FirstOrDefault(p => p.IsMatch(device));
+        List<ILayoutProvider> layoutProviders = _getLayoutProviders();
+        ILayoutProvider? provider = layoutProviders.FirstOrDefault(p => p.IsMatch(device));
         if (provider == null)
             _logger.Warning("Could not find a layout provider for type {LayoutType} of device {Device}", device.LayoutSelection.Type, device);
 
         ArtemisLayout? layout = provider?.GetDeviceLayout(device);
+        if (layout == null && provider is not DefaultLayoutProvider)
+        {
+            // A restored database can still reference a Workshop/custom layout whose
+            // external files are no longer installed. Keep that selection intact so it
+            // becomes active again if the files return, but use the device plugin's
+            // bundled layout in the meantime instead of leaving the device unusable.
+            DefaultLayoutProvider? fallbackProvider = layoutProviders.OfType<DefaultLayoutProvider>().FirstOrDefault();
+            ArtemisLayout? fallbackLayout = fallbackProvider?.GetDeviceLayout(device);
+            if (fallbackLayout != null && fallbackLayout.IsValid)
+            {
+                _logger.Warning("Layout {LayoutType}:{LayoutParameter} is unavailable for {Device}; using the bundled/default layout without changing the saved selection",
+                    device.LayoutSelection.Type, device.LayoutSelection.Parameter, device);
+                provider = fallbackProvider;
+                layout = fallbackLayout;
+            }
+        }
+
         if (layout != null && !layout.IsValid)
         {
             _logger.Warning("Got an invalid layout {Layout} from {LayoutProvider}", layout, provider!.GetType().FullName);
@@ -201,11 +248,14 @@ internal class DeviceService : IDeviceService
     /// <inheritdoc />
     public void EnableDevice(ArtemisDevice device)
     {
-        if (device.IsEnabled)
-            return;
-
-        _enabledDevices.Add(device);
-        device.IsEnabled = true;
+        lock (_devicesLock)
+        {
+            if (device.IsEnabled)
+                return;
+            _enabledDevices.Add(device);
+            device.IsEnabled = true;
+            UpdateDeviceSnapshots();
+        }
         device.Save();
         _deviceRepository.Save(device.DeviceEntity);
 
@@ -216,11 +266,14 @@ internal class DeviceService : IDeviceService
     /// <inheritdoc />
     public void DisableDevice(ArtemisDevice device)
     {
-        if (!device.IsEnabled)
-            return;
-
-        _enabledDevices.Remove(device);
-        device.IsEnabled = false;
+        lock (_devicesLock)
+        {
+            if (!device.IsEnabled)
+                return;
+            _enabledDevices.Remove(device);
+            device.IsEnabled = false;
+            UpdateDeviceSnapshots();
+        }
         device.Save();
         _deviceRepository.Save(device.DeviceEntity);
 
@@ -239,9 +292,10 @@ internal class DeviceService : IDeviceService
     /// <inheritdoc />
     public void SaveDevices()
     {
-        foreach (ArtemisDevice artemisDevice in _devices)
+        IReadOnlyCollection<ArtemisDevice> devices = Devices;
+        foreach (ArtemisDevice artemisDevice in devices)
             artemisDevice.Save();
-        _deviceRepository.SaveRange(_devices.Select(d => d.DeviceEntity));
+        _deviceRepository.SaveRange(devices.Select(d => d.DeviceEntity));
         UpdateLeds();
     }
 
@@ -322,15 +376,28 @@ internal class DeviceService : IDeviceService
         }
     }
 
-    private ArtemisDevice GetArtemisDevice(IRGBDevice rgbDevice)
+    private ArtemisDevice GetArtemisDevice(IRGBDevice rgbDevice, DeviceProvider deviceProvider)
     {
-        string deviceIdentifier = rgbDevice.GetDeviceIdentifier();
+        string deviceIdentifier = deviceProvider.GetDeviceIdentifier(rgbDevice);
         DeviceEntity? deviceEntity = _deviceRepository.Get(deviceIdentifier);
-        DeviceProvider deviceProvider = _pluginManagementService.GetDeviceProviderByDevice(rgbDevice);
+        string legacyIdentifier = rgbDevice.GetDeviceIdentifier();
+        if (deviceEntity == null && legacyIdentifier != deviceIdentifier)
+        {
+            deviceEntity = _deviceRepository.Rename(legacyIdentifier, deviceIdentifier);
+            if (deviceEntity != null)
+                _logger.Information("Migrated device identity {LegacyIdentifier} to provider identity {Identifier}", legacyIdentifier, deviceIdentifier);
+        }
 
         ArtemisDevice device;
         if (deviceEntity != null)
+        {
             device = new ArtemisDevice(rgbDevice, deviceProvider, deviceEntity);
+            // Profiles are stored separately from device configuration and may retain the old
+            // identifier for an arbitrary amount of time. Keep accepting it on every startup,
+            // not just during the one run in which the device row was migrated.
+            if (legacyIdentifier != deviceIdentifier)
+                device.AddIdentifierAlias(legacyIdentifier);
+        }
         // Fall back on creating a new device
         else
         {
@@ -343,8 +410,125 @@ internal class DeviceService : IDeviceService
         return device;
     }
 
+    private void SubscribeToDevicesChanged(DeviceProvider deviceProvider, IRGBDeviceProvider rgbDeviceProvider)
+    {
+        void Handler(object? sender, DevicesChangedEventArgs e)
+        {
+            lock (_deviceChangeLock)
+            {
+                try
+                {
+                    if (!deviceProvider.IsEnabled)
+                        return;
+
+                    if (e.Action == DevicesChangedEventArgs.DevicesChangedAction.Added)
+                        HandleRuntimeDeviceAdded(deviceProvider, e.Device);
+                    else
+                        HandleRuntimeDeviceRemoved(deviceProvider, e.Device);
+                }
+                catch (Exception exception)
+                {
+                    _logger.Error(exception, "Failed to process runtime device change from {DeviceProvider} ({Action} {Device})",
+                        deviceProvider.GetType().Name, e.Action, e.Device.DeviceInfo.DeviceName);
+                }
+            }
+        }
+
+        UnsubscribeFromDevicesChanged(deviceProvider);
+        rgbDeviceProvider.DevicesChanged += Handler;
+        _devicesChangedHandlers[deviceProvider] = (rgbDeviceProvider, Handler);
+    }
+
+    private void UnsubscribeFromDevicesChanged(DeviceProvider deviceProvider)
+    {
+        if (!_devicesChangedHandlers.Remove(deviceProvider, out (IRGBDeviceProvider Provider, EventHandler<DevicesChangedEventArgs> Handler) subscription))
+            return;
+
+        subscription.Provider.DevicesChanged -= subscription.Handler;
+    }
+
+    private void HandleRuntimeDeviceRemoved(DeviceProvider deviceProvider, IRGBDevice rgbDevice)
+    {
+        ArtemisDevice? device;
+        lock (_devicesLock)
+            device = _devices.FirstOrDefault(d => ReferenceEquals(d.DeviceProvider, deviceProvider) && ReferenceEquals(d.RgbDevice, rgbDevice));
+        if (device == null || !device.IsConnected)
+            return;
+
+        // Detach the dead RGB.NET object from the rendering surface, but retain the logical
+        // Artemis device and LEDs used by profiles. A matching add event can rebind them later.
+        OnDeviceDisconnected(new DeviceEventArgs(device));
+        device.Disconnect();
+        _logger.Information("Device provider {DeviceProvider} disconnected {Device}; retaining Artemis identity {Identifier}",
+            deviceProvider.GetType().Name, rgbDevice.DeviceInfo.DeviceName, device.Identifier);
+    }
+
+    private void HandleRuntimeDeviceAdded(DeviceProvider deviceProvider, IRGBDevice rgbDevice)
+    {
+        string identifier = deviceProvider.GetDeviceIdentifier(rgbDevice);
+        ArtemisDevice? existing;
+        lock (_devicesLock)
+            existing = _devices.FirstOrDefault(d => ReferenceEquals(d.DeviceProvider, deviceProvider) && d.Identifier == identifier);
+        if (existing != null)
+        {
+            if (ReferenceEquals(existing.RgbDevice, rgbDevice))
+                return;
+
+            if (existing.IsConnected)
+            {
+                OnDeviceDisconnected(new DeviceEventArgs(existing));
+                existing.Disconnect();
+                _logger.Warning("Device provider {DeviceProvider} added replacement {Device} before removing the previous RGB.NET object for Artemis identity {Identifier}; rebinding the existing logical device",
+                    deviceProvider.GetType().Name, rgbDevice.DeviceInfo.DeviceName, identifier);
+            }
+
+            bool topologyPreserved = existing.Rebind(rgbDevice);
+            OnDeviceReconnected(new DeviceEventArgs(existing));
+            if (!topologyPreserved)
+                UpdateLeds();
+
+            _logger.Information("Device provider {DeviceProvider} reconnected {Device} to retained Artemis identity {Identifier} (LED topology preserved: {TopologyPreserved})",
+                deviceProvider.GetType().Name, rgbDevice.DeviceInfo.DeviceName, identifier, topologyPreserved);
+            return;
+        }
+
+        ArtemisDevice addedDevice = GetArtemisDevice(rgbDevice, deviceProvider);
+        lock (_devicesLock)
+        {
+            _devices.Add(addedDevice);
+            if (addedDevice.IsEnabled)
+                _enabledDevices.Add(addedDevice);
+            _devices.Sort((a, b) => a.ZIndex - b.ZIndex);
+            _enabledDevices.Sort((a, b) => a.ZIndex - b.ZIndex);
+            UpdateDeviceSnapshots();
+        }
+
+        OnDeviceAdded(new DeviceEventArgs(addedDevice));
+        UpdateLeds();
+        _logger.Information("Device provider {DeviceProvider} added runtime device {Device} with Artemis identity {Identifier}",
+            deviceProvider.GetType().Name, rgbDevice.DeviceInfo.DeviceName, identifier);
+    }
+
+    private void UpdateDeviceSnapshots()
+    {
+        _devicesSnapshot = _devices.ToList().AsReadOnly();
+        _enabledDevicesSnapshot = _enabledDevices.ToList().AsReadOnly();
+    }
+
+    private static bool IsSameProvider(DeviceProvider first, DeviceProvider second)
+    {
+        if (first.Plugin != null && second.Plugin != null)
+            return first.Plugin.Guid == second.Plugin.Guid;
+
+        // Unit-test and development providers may not have an owning Plugin assigned.
+        return first.GetType().FullName == second.GetType().FullName;
+    }
+
     private void BlinkDevice(ArtemisDevice device, int blinkCount)
     {
+        if (!device.IsConnected)
+            return;
+
         RGBSurface surface = _renderService.Value.Surface;
 
         // Create a LED group way at the top
@@ -395,6 +579,12 @@ internal class DeviceService : IDeviceService
     public event EventHandler<DeviceEventArgs>? DeviceRemoved;
 
     /// <inheritdoc />
+    public event EventHandler<DeviceEventArgs>? DeviceDisconnected;
+
+    /// <inheritdoc />
+    public event EventHandler<DeviceEventArgs>? DeviceReconnected;
+
+    /// <inheritdoc />
     public event EventHandler<DeviceEventArgs>? DeviceEnabled;
 
     /// <inheritdoc />
@@ -417,6 +607,16 @@ internal class DeviceService : IDeviceService
     protected virtual void OnDeviceRemoved(DeviceEventArgs e)
     {
         DeviceRemoved?.Invoke(this, e);
+    }
+
+    protected virtual void OnDeviceDisconnected(DeviceEventArgs e)
+    {
+        DeviceDisconnected?.Invoke(this, e);
+    }
+
+    protected virtual void OnDeviceReconnected(DeviceEventArgs e)
+    {
+        DeviceReconnected?.Invoke(this, e);
     }
 
     protected virtual void OnDeviceEnabled(DeviceEventArgs e)

@@ -98,6 +98,16 @@ public interface IDeviceService : IArtemisService
     event EventHandler<DeviceEventArgs> DeviceRemoved;
 
     /// <summary>
+    ///     Occurs when a device temporarily loses its live provider backing while its logical Artemis identity is retained.
+    /// </summary>
+    event EventHandler<DeviceEventArgs> DeviceDisconnected;
+
+    /// <summary>
+    ///     Occurs when a disconnected device receives a new live provider backing.
+    /// </summary>
+    event EventHandler<DeviceEventArgs> DeviceReconnected;
+
+    /// <summary>
     ///     Occurs when a single device was disabled
     /// </summary>
     event EventHandler<DeviceEventArgs> DeviceEnabled;

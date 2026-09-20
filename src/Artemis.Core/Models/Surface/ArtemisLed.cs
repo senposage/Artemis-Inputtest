@@ -25,7 +25,7 @@ public class ArtemisLed : CorePropertyChanged
     /// <summary>
     ///     Gets the RGB.NET LED backing this Artemis LED
     /// </summary>
-    public Led RgbLed { get; }
+    public Led RgbLed { get; private set; }
 
     /// <summary>
     ///     Gets the device that contains this LED
@@ -75,5 +75,14 @@ public class ArtemisLed : CorePropertyChanged
             RgbLed.AbsoluteBoundary.Size.Width,
             RgbLed.AbsoluteBoundary.Size.Height
         );
+    }
+
+    internal void Rebind(Led led)
+    {
+        RgbLed = led;
+        Layout = Device.Layout?.Leds.FirstOrDefault(l => l.RgbLayout.Id == led.Id.ToString());
+        Layout?.ApplyCustomLedData(Device);
+        CalculateRectangles();
+        OnPropertyChanged(nameof(RgbLed));
     }
 }
