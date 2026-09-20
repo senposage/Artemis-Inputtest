@@ -60,8 +60,8 @@ public class UpdateService : IUpdateService
         else
             throw new PlatformNotSupportedException("Cannot auto update on the current platform");
 
-        _autoCheck = settingsService.GetSetting("UI.Updating.AutoCheck", true);
-        _autoInstall = settingsService.GetSetting("UI.Updating.AutoInstall", true);
+        _autoCheck = settingsService.GetSetting("UI.Updating.AutoCheck", false);
+        _autoInstall = settingsService.GetSetting("UI.Updating.AutoInstall", false);
         _autoCheck.SettingChanged += HandleAutoUpdateEvent;
         mainWindowService.MainWindowOpened += HandleAutoUpdateEvent;
         Timer timer = new(UPDATE_CHECK_INTERVAL);
