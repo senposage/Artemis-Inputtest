@@ -116,6 +116,51 @@ public class DeviceHotplugTests
     }
 
     [Fact]
+    public void ObsoleteSplitChildIsNotLabeledMissingWhileParentIsPresent()
+    {
+        DeviceEntity obsoleteZone = CreateEntity("test:mainboard|zone:7");
+        obsoleteZone.DeviceProvider = TestArtemisProvider.PluginId;
+        IDeviceRepository repository = Substitute.For<IDeviceRepository>();
+        repository.GetAll().Returns([obsoleteZone]);
+        DeviceService service = CreateDeviceService(repository);
+        repository.Get("test:mainboard|zone:7").Returns(obsoleteZone);
+
+        Assert.Same(obsoleteZone, Assert.Single(service.MissingStoredDevices));
+
+        TestRgbProvider rgbProvider = new(new TestRgbDevice("mainboard|zone:2"));
+        service.AddDeviceProvider(new TestArtemisProvider(rgbProvider) {IsEnabled = true});
+
+        Assert.Empty(service.MissingStoredDevices);
+        repository.DidNotReceive().Remove(obsoleteZone);
+
+        TestRgbDevice returningZone = new("mainboard|zone:7");
+        rgbProvider.Connect(returningZone);
+
+        ArtemisDevice restored = service.Devices.Single(device => device.Identifier == "test:mainboard|zone:7");
+        Assert.Same(obsoleteZone, restored.DeviceEntity);
+        repository.DidNotReceive().Remove(obsoleteZone);
+    }
+
+    [Fact]
+    public void FirstRuntimeSplitChildRefreshesMissingStoredClassification()
+    {
+        DeviceEntity obsoleteZone = CreateEntity("test:mainboard|zone:7");
+        obsoleteZone.DeviceProvider = TestArtemisProvider.PluginId;
+        IDeviceRepository repository = Substitute.For<IDeviceRepository>();
+        repository.GetAll().Returns([obsoleteZone]);
+        DeviceService service = CreateDeviceService(repository);
+        TestRgbProvider rgbProvider = new();
+
+        service.AddDeviceProvider(new TestArtemisProvider(rgbProvider) {IsEnabled = true});
+        Assert.Same(obsoleteZone, Assert.Single(service.MissingStoredDevices));
+
+        rgbProvider.Connect(new TestRgbDevice("mainboard|zone:2"));
+
+        Assert.Empty(service.MissingStoredDevices);
+        repository.DidNotReceive().Remove(obsoleteZone);
+    }
+
+    [Fact]
     public void MissingDevicesCanBePermanentlyForgotten()
     {
         DeviceEntity stored = CreateEntity("test:lost-device");
@@ -380,8 +425,9 @@ public class DeviceHotplugTests
 
     private sealed class TestArtemisProvider : DeviceProvider
     {
+        public const string PluginId = "5d56f8da-ffb2-4d2d-bb5f-a175ab53a260";
         private static readonly Plugin TestPlugin = new(
-            new PluginInfo {Guid = Guid.Parse("5d56f8da-ffb2-4d2d-bb5f-a175ab53a260"), Name = "Test", Version = "1.0.0", Main = "Test.dll"},
+            new PluginInfo {Guid = Guid.Parse(PluginId), Name = "Test", Version = "1.0.0", Main = "Test.dll"},
             new DirectoryInfo(AppContext.BaseDirectory), new PluginEntity(), false);
         private readonly TestRgbProvider _rgbProvider;
 
@@ -393,6 +439,13 @@ public class DeviceHotplugTests
 
         public override IRGBDeviceProvider RgbDeviceProvider => _rgbProvider;
         public override string GetDeviceIdentifier(IRGBDevice device) => $"test:{((TestDeviceInfo) device.DeviceInfo).StableId}";
+        public override string? GetParentDeviceIdentifier(string deviceIdentifier)
+        {
+            int separatorIndex = deviceIdentifier.LastIndexOf('|');
+            return separatorIndex >= 0 && deviceIdentifier[(separatorIndex + 1)..].StartsWith("zone:", StringComparison.Ordinal)
+                ? deviceIdentifier[..separatorIndex]
+                : null;
+        }
         public override void Enable() { }
         public override void Disable() { }
     }

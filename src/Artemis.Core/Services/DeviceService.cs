@@ -110,6 +110,7 @@ internal class DeviceService : IDeviceService
 
             List<ArtemisDevice> addedDevices = [];
             List<(ArtemisDevice Device, bool TopologyPreserved, bool WasHidden)> reconnectedDevices = [];
+            bool missingStoredDevicesChanged;
             lock (_deviceChangeLock)
             {
                 SubscribeToDevicesChanged(deviceProvider, rgbDeviceProvider);
@@ -163,6 +164,7 @@ internal class DeviceService : IDeviceService
                     _devices.AddRange(addedDevices);
                     _enabledDevices.AddRange(addedDevices.Where(d => d.IsEnabled));
                     SortDevicesAndUpdateSnapshots();
+                    missingStoredDevicesChanged = UpdateMissingStoredDevicesSnapshot();
                 }
             }
 
@@ -183,6 +185,8 @@ internal class DeviceService : IDeviceService
             // topology is identical to the device that disappeared.
             if (addedDevices.Count > 0 || reconnectedDevices.Any(d => d.WasHidden || !d.TopologyPreserved))
                 UpdateLeds();
+            if (missingStoredDevicesChanged)
+                OnMissingStoredDevicesChanged();
         }
         catch (Exception e)
         {
@@ -668,15 +672,19 @@ internal class DeviceService : IDeviceService
         }
 
         ArtemisDevice addedDevice = GetArtemisDevice(rgbDevice, deviceProvider);
+        bool missingStoredDevicesChanged;
         lock (_devicesLock)
         {
             _devices.Add(addedDevice);
             if (addedDevice.IsEnabled)
                 _enabledDevices.Add(addedDevice);
             SortDevicesAndUpdateSnapshots();
+            missingStoredDevicesChanged = UpdateMissingStoredDevicesSnapshot();
         }
 
         OnDeviceAdded(new DeviceEventArgs(addedDevice));
+        if (missingStoredDevicesChanged)
+            OnMissingStoredDevicesChanged();
         UpdateLeds();
         _logger.Information("Device provider {DeviceProvider} added runtime device {Device} with Artemis identity {Identifier}",
             deviceProvider.GetType().Name, rgbDevice.DeviceInfo.DeviceName, identifier);
@@ -689,9 +697,36 @@ internal class DeviceService : IDeviceService
         _missingDevicesSnapshot = _retainedDevices.ToList().AsReadOnly();
     }
 
-    private void UpdateMissingStoredDevicesSnapshot()
+    private bool UpdateMissingStoredDevicesSnapshot()
     {
-        _missingStoredDevicesSnapshot = _missingStoredDevices.ToList().AsReadOnly();
+        List<DeviceProvider> connectedProviders = _devices
+            .Where(device => device.IsConnected)
+            .Select(device => device.DeviceProvider)
+            .Distinct()
+            .ToList();
+
+        List<DeviceEntity> visibleMissingDevices = _missingStoredDevices.Where(entity =>
+        {
+            DeviceProvider? provider = connectedProviders.FirstOrDefault(candidate =>
+                candidate.Plugin != null && candidate.Plugin.Guid.ToString() == entity.DeviceProvider);
+            if (provider == null)
+                return true;
+
+            string? parentIdentifier = provider.GetParentDeviceIdentifier(entity.Id);
+            if (parentIdentifier == null)
+                return true;
+
+            // A connected sibling proves the physical controller is present. Keep the
+            // stored child and its deferred bindings, but do not mislabel an obsolete or
+            // temporarily absent topology child as a missing physical device.
+            return !_devices.Any(device => device.IsConnected && ReferenceEquals(device.DeviceProvider, provider) &&
+                provider.GetParentDeviceIdentifier(device.Identifier) == parentIdentifier);
+        }).ToList();
+
+        bool changed = !_missingStoredDevicesSnapshot.Select(entity => entity.Id)
+            .SequenceEqual(visibleMissingDevices.Select(entity => entity.Id));
+        _missingStoredDevicesSnapshot = visibleMissingDevices.AsReadOnly();
+        return changed;
     }
 
     private void RetainDisconnectedDevice(ArtemisDevice device)

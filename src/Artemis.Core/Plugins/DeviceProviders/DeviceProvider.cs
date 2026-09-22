@@ -28,6 +28,18 @@ public abstract class DeviceProvider : PluginFeature
     }
 
     /// <summary>
+    /// Returns the persistent identity of the physical parent represented by a split child device identifier.
+    /// Providers that expose one physical controller as multiple logical devices can override this method so
+    /// Artemis does not label an obsolete child topology entry as a missing physical device while a sibling is present.
+    /// </summary>
+    /// <param name="deviceIdentifier">The persistent identifier of a current or stored logical device.</param>
+    /// <returns>The shared physical-parent identity, or <see langword="null" /> for an independent device.</returns>
+    public virtual string? GetParentDeviceIdentifier(string deviceIdentifier)
+    {
+        return null;
+    }
+
+    /// <summary>
     ///     A boolean indicating whether this device provider detects the physical layout of connected keyboards.
     ///     <para>
     ///         Note: <see cref="GetLogicalLayout" /> is only called when this or <see cref="CanDetectLogicalLayout" />
