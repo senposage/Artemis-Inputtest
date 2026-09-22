@@ -64,7 +64,7 @@ internal class DeviceService : IDeviceService
     // rebuilding it after one USB device changes. Keep those transient removals out of
     // the public Missing collection while still detaching their dead RGB.NET objects
     // from the renderer immediately.
-    internal TimeSpan DeviceRemovalGracePeriod { get; set; } = TimeSpan.FromSeconds(2);
+    internal TimeSpan DeviceRemovalGracePeriod { get; set; } = TimeSpan.FromSeconds(5);
 
     /// <inheritdoc />
     public void IdentifyDevice(ArtemisDevice device)
