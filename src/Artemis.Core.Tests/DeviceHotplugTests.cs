@@ -65,6 +65,32 @@ public class DeviceHotplugTests
     }
 
     [Fact]
+    public async Task TransientRemovalDoesNotEnterMissingOrRaiseRemoved()
+    {
+        TestRgbDevice original = new("mouse-a");
+        TestRgbProvider rgbProvider = new(original);
+        DeviceService service = CreateDeviceService();
+        service.DeviceRemovalGracePeriod = TimeSpan.FromMilliseconds(150);
+        service.AddDeviceProvider(new TestArtemisProvider(rgbProvider) {IsEnabled = true});
+        ArtemisDevice logicalDevice = Assert.Single(service.Devices);
+        int removed = 0;
+        service.DeviceRemoved += (_, _) => removed++;
+
+        rgbProvider.Disconnect(original);
+        Assert.Empty(service.MissingDevices);
+
+        TestRgbDevice replacement = new("mouse-a");
+        rgbProvider.Connect(replacement);
+        await Task.Delay(250);
+
+        Assert.Same(logicalDevice, Assert.Single(service.Devices));
+        Assert.Empty(service.MissingDevices);
+        Assert.True(logicalDevice.IsConnected);
+        Assert.Same(replacement, logicalDevice.RgbDevice);
+        Assert.Equal(0, removed);
+    }
+
+    [Fact]
     public void SavedMissingDeviceIsClaimedImmediatelyWhenItReconnects()
     {
         DeviceEntity stored = CreateEntity("test:mouse-a");
@@ -318,7 +344,10 @@ public class DeviceHotplugTests
         ILogger logger = new LoggerConfiguration().CreateLogger();
 
         return new DeviceService(logger, pluginManagementService, repository, new Lazy<IRenderService>(() => renderService),
-            () => [new NoneLayoutProvider()]);
+            () => [new NoneLayoutProvider()])
+        {
+            DeviceRemovalGracePeriod = TimeSpan.Zero
+        };
     }
 
     private static DeviceEntity CreateEntity(string id)

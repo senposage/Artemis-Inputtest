@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Artemis.Core.DeviceProviders;
 using Artemis.Core.Providers;
@@ -26,6 +27,7 @@ internal class DeviceService : IDeviceService
     private readonly List<DeviceEntity> _missingStoredDevices;
     private readonly object _devicesLock = new();
     private readonly Dictionary<DeviceProvider, (IRGBDeviceProvider Provider, EventHandler<DevicesChangedEventArgs> Handler)> _devicesChangedHandlers = [];
+    private readonly Dictionary<ArtemisDevice, CancellationTokenSource> _pendingDeviceRemovals = [];
     private readonly object _deviceChangeLock = new();
     private readonly List<DeviceProvider> _suspendedDeviceProviders = [];
     private readonly object _suspensionLock = new();
@@ -57,6 +59,12 @@ internal class DeviceService : IDeviceService
     public IReadOnlyCollection<ArtemisDevice> Devices => _devicesSnapshot;
     public IReadOnlyCollection<ArtemisDevice> MissingDevices => _missingDevicesSnapshot;
     public IReadOnlyCollection<DeviceEntity> MissingStoredDevices => _missingStoredDevicesSnapshot;
+
+    // Providers such as OpenRGB can briefly withdraw their entire device list while
+    // rebuilding it after one USB device changes. Keep those transient removals out of
+    // the public Missing collection while still detaching their dead RGB.NET objects
+    // from the renderer immediately.
+    internal TimeSpan DeviceRemovalGracePeriod { get; set; } = TimeSpan.FromSeconds(2);
 
     /// <inheritdoc />
     public void IdentifyDevice(ArtemisDevice device)
@@ -560,15 +568,58 @@ internal class DeviceService : IDeviceService
         if (device == null || !device.IsConnected)
             return;
 
-        // Detach the dead RGB.NET object from the rendering surface, but retain the logical
-        // Artemis device and LEDs used by profiles. A matching add event can rebind them later.
+        // Stop rendering to the dead RGB.NET object immediately, but wait before publishing
+        // the device as missing. Some providers emit a remove/add storm around a rescan.
         OnDeviceDisconnected(new DeviceEventArgs(device));
         device.Disconnect();
-        RetainDisconnectedDevice(device);
-        OnDeviceRemoved(new DeviceEventArgs(device));
-        UpdateLeds();
-        _logger.Information("Device provider {DeviceProvider} disconnected {Device}; retaining Artemis identity {Identifier}",
-            deviceProvider.GetType().Name, rgbDevice.DeviceInfo.DeviceName, device.Identifier);
+
+        if (_pendingDeviceRemovals.Remove(device, out CancellationTokenSource? previousRemoval))
+        {
+            previousRemoval.Cancel();
+            previousRemoval.Dispose();
+        }
+
+        var cancellation = new CancellationTokenSource();
+        _pendingDeviceRemovals[device] = cancellation;
+        _ = FinalizeRuntimeDeviceRemovalAfterGracePeriod(deviceProvider, rgbDevice, device, cancellation);
+        _logger.Information("Device provider {DeviceProvider} temporarily disconnected {Device}; waiting {GracePeriodMs} ms before marking Artemis identity {Identifier} missing",
+            deviceProvider.GetType().Name, rgbDevice.DeviceInfo.DeviceName, DeviceRemovalGracePeriod.TotalMilliseconds, device.Identifier);
+    }
+
+    private async Task FinalizeRuntimeDeviceRemovalAfterGracePeriod(DeviceProvider deviceProvider, IRGBDevice rgbDevice,
+        ArtemisDevice device, CancellationTokenSource cancellation)
+    {
+        try
+        {
+            await Task.Delay(DeviceRemovalGracePeriod, cancellation.Token);
+            lock (_deviceChangeLock)
+            {
+                if (cancellation.IsCancellationRequested ||
+                    !_pendingDeviceRemovals.TryGetValue(device, out CancellationTokenSource? current) ||
+                    !ReferenceEquals(current, cancellation) || device.IsConnected)
+                    return;
+
+                _pendingDeviceRemovals.Remove(device);
+                RetainDisconnectedDevice(device);
+                OnDeviceRemoved(new DeviceEventArgs(device));
+                UpdateLeds();
+                _logger.Information("Device provider {DeviceProvider} disconnected {Device}; retaining Artemis identity {Identifier} as missing",
+                    deviceProvider.GetType().Name, rgbDevice.DeviceInfo.DeviceName, device.Identifier);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // The same logical device returned during the grace period.
+        }
+        catch (Exception exception)
+        {
+            _logger.Error(exception, "Failed to finalize removal of {Device} from {DeviceProvider}",
+                rgbDevice.DeviceInfo.DeviceName, deviceProvider.GetType().Name);
+        }
+        finally
+        {
+            cancellation.Dispose();
+        }
     }
 
     private void HandleRuntimeDeviceAdded(DeviceProvider deviceProvider, IRGBDevice rgbDevice)
@@ -583,7 +634,10 @@ internal class DeviceService : IDeviceService
         }
         if (existing != null)
         {
-            if (ReferenceEquals(existing.RgbDevice, rgbDevice))
+            if (_pendingDeviceRemovals.Remove(existing, out CancellationTokenSource? pendingRemoval))
+                pendingRemoval.Cancel();
+
+            if (ReferenceEquals(existing.RgbDevice, rgbDevice) && existing.IsConnected)
                 return;
 
             if (existing.IsConnected)
