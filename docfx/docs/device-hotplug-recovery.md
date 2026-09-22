@@ -89,12 +89,13 @@ rebinds the replacement RGB.NET object. If the device had reached Missing,
 Artemis also refreshes the render surface so deferred layer bindings become
 active immediately; no Artemis or OpenRGB restart is required.
 
-## Five-second removal grace period
+## Eight-second removal grace period
 
-Runtime removals wait five seconds before becoming Missing. A matching add
+Runtime removals wait eight seconds before becoming Missing. A matching add
 during that window cancels the removal. The delay is intentionally generous:
 OpenRGB detection may briefly omit devices, particularly controllers late in
-the detection order.
+the detection order. It also accommodates controllers such as the Roccat
+Vulcan II Max that can take roughly six seconds to initialize after a rescan.
 
 The grace period is core protection and applies after a provider publishes a
 remove event. The OpenRGB plugin adds a second layer of protection by refusing
@@ -173,7 +174,7 @@ saved identity is intentionally being discarded.
 ### Transient unplug or rescan
 
 1. Provider reports remove.
-2. Artemis starts the five-second timer and retains the logical device.
+2. Artemis starts the eight-second timer and retains the logical device.
 3. Provider reports the same identifier before the timer expires.
 4. Artemis cancels removal and rebinds the backing object.
 5. Rendering continues with the existing profile bindings.

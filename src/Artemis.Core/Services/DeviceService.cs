@@ -64,7 +64,10 @@ internal class DeviceService : IDeviceService
     // rebuilding it after one USB device changes. Keep those transient removals out of
     // the public Missing collection while still detaching their dead RGB.NET objects
     // from the renderer immediately.
-    internal TimeSpan DeviceRemovalGracePeriod { get; set; } = TimeSpan.FromSeconds(5);
+    // OpenRGB can take roughly six seconds to finish initializing a controller
+    // after a rescan. Keep logical devices alive long enough that a normal scan
+    // cannot surface them as missing hardware.
+    internal TimeSpan DeviceRemovalGracePeriod { get; set; } = TimeSpan.FromSeconds(8);
 
     /// <inheritdoc />
     public void IdentifyDevice(ArtemisDevice device)
@@ -429,11 +432,15 @@ internal class DeviceService : IDeviceService
         string deviceIdentifier = deviceProvider.GetDeviceIdentifier(rgbDevice);
         DeviceEntity? deviceEntity = _deviceRepository.Get(deviceIdentifier);
         string legacyIdentifier = rgbDevice.GetDeviceIdentifier();
-        if (deviceEntity == null && legacyIdentifier != deviceIdentifier)
+        IEnumerable<string> legacyIdentifiers = [legacyIdentifier, ..deviceProvider.GetLegacyDeviceIdentifiers(rgbDevice)];
+        foreach (string oldIdentifier in legacyIdentifiers.Distinct())
         {
-            deviceEntity = _deviceRepository.Rename(legacyIdentifier, deviceIdentifier);
+            if (deviceEntity != null || oldIdentifier == deviceIdentifier)
+                continue;
+
+            deviceEntity = _deviceRepository.Rename(oldIdentifier, deviceIdentifier);
             if (deviceEntity != null)
-                _logger.Information("Migrated device identity {LegacyIdentifier} to provider identity {Identifier}", legacyIdentifier, deviceIdentifier);
+                _logger.Information("Migrated device identity {LegacyIdentifier} to provider identity {Identifier}", oldIdentifier, deviceIdentifier);
         }
 
         ArtemisDevice device;

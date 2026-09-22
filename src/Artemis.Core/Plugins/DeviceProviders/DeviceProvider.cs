@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using RGB.NET.Core;
@@ -25,6 +26,17 @@ public abstract class DeviceProvider : PluginFeature
     public virtual string GetDeviceIdentifier(IRGBDevice device)
     {
         return device.GetDeviceIdentifier();
+    }
+
+    /// <summary>
+    /// Returns former persistent identifiers that should be migrated to the current identifier for this device.
+    /// This is for a provider that replaces an upstream identifier known to be unstable with a durable one.
+    /// </summary>
+    /// <param name="device">The current RGB.NET device.</param>
+    /// <returns>Identifiers that represent this same device under an older provider identity scheme.</returns>
+    public virtual IEnumerable<string> GetLegacyDeviceIdentifiers(IRGBDevice device)
+    {
+        return [];
     }
 
     /// <summary>
