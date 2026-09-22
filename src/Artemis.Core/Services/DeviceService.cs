@@ -178,7 +178,10 @@ internal class DeviceService : IDeviceService
                     deviceProvider.GetType().Name, device.RgbDevice.DeviceInfo.DeviceName, device.Identifier, topologyPreserved);
             }
 
-            if (addedDevices.Count > 0 || reconnectedDevices.Any(d => !d.TopologyPreserved))
+            // A hidden/missing device has had its profile LEDs moved into each layer's
+            // deferred binding list. Repopulate those bindings even when the physical LED
+            // topology is identical to the device that disappeared.
+            if (addedDevices.Count > 0 || reconnectedDevices.Any(d => d.WasHidden || !d.TopologyPreserved))
                 UpdateLeds();
         }
         catch (Exception e)
@@ -653,7 +656,10 @@ internal class DeviceService : IDeviceService
             if (wasHidden)
                 OnDeviceAdded(new DeviceEventArgs(existing));
             OnDeviceReconnected(new DeviceEventArgs(existing));
-            if (!topologyPreserved)
+            // Once a device reached the Missing collection, active profile layers moved
+            // its LEDs into deferred bindings. A topology-preserving rebind must still
+            // notify ProfileService so those LEDs become active again.
+            if (wasHidden || !topologyPreserved)
                 UpdateLeds();
 
             _logger.Information("Device provider {DeviceProvider} reconnected {Device} to retained Artemis identity {Identifier} (LED topology preserved: {TopologyPreserved})",

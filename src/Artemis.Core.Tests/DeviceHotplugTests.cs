@@ -33,8 +33,10 @@ public class DeviceHotplugTests
         ArtemisLed logicalLed = Assert.Single(logicalDevice.Leds);
         int added = 0;
         int removed = 0;
+        int ledsChanged = 0;
         service.DeviceAdded += (_, _) => added++;
         service.DeviceRemoved += (_, _) => removed++;
+        service.LedsChanged += (_, _) => ledsChanged++;
 
         rgbProvider.Disconnect(original);
 
@@ -43,10 +45,12 @@ public class DeviceHotplugTests
         Assert.Same(logicalDevice, Assert.Single(service.MissingDevices));
         Assert.Equal(1, disconnected);
         Assert.Equal(1, removed);
+        Assert.Equal(1, ledsChanged);
 
         service.SaveDevices();
         repository.Received(1).SaveRange(Arg.Is<IEnumerable<DeviceEntity>>(entities =>
             entities.Count() == 1 && ReferenceEquals(entities.Single(), logicalDevice.DeviceEntity)));
+        int ledsChangedBeforeReconnect = ledsChanged;
 
         TestRgbDevice replacement = new("mouse-a");
         rgbProvider.Connect(replacement);
@@ -60,6 +64,9 @@ public class DeviceHotplugTests
         Assert.Same(replacement.Single(), logicalLed.RgbLed);
         Assert.Equal(1, reconnected);
         Assert.Equal(1, added);
+        // Reconnecting from Missing must repopulate deferred profile LED bindings even
+        // when every ArtemisLed object and LED ID was preserved.
+        Assert.Equal(ledsChangedBeforeReconnect + 1, ledsChanged);
         repository.DidNotReceiveWithAnyArgs().Remove(default!);
         repository.Received(1).Get("test:mouse-a");
     }
