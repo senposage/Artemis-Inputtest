@@ -789,11 +789,40 @@ public sealed class Layer : RenderProfileElement
         if (Disposed)
             throw new ObjectDisposedException("Layer");
 
-        if (!_leds.Any())
+        if (!_leds.Any() && !_missingLeds.Any())
             return;
 
         _leds.Clear();
+        // Missing LEDs represent temporarily disconnected devices and are normally
+        // preserved on save. An explicit clear/change selection is user intent to unbind,
+        // so those deferred bindings must be cleared as well.
+        _missingLeds.Clear();
         CalculateRenderProperties();
+    }
+
+    internal bool RemoveDeviceBindings(ArtemisDevice device)
+    {
+        return RemoveDeviceBindings(identifier => device.MatchesIdentifier(identifier), device);
+    }
+
+    internal bool RemoveDeviceBindings(Func<string, bool> matchesIdentifier)
+    {
+        return RemoveDeviceBindings(matchesIdentifier, null);
+    }
+
+    private bool RemoveDeviceBindings(Func<string, bool> matchesIdentifier, ArtemisDevice? device)
+    {
+        if (Disposed)
+            throw new ObjectDisposedException("Layer");
+
+        int removedLeds = _leds.RemoveAll(led => device != null ? ReferenceEquals(led.Device, device) : matchesIdentifier(led.Device.Identifier));
+        int removedMissing = _missingLeds.RemoveAll(led => matchesIdentifier(led.DeviceIdentifier));
+        int removedEntities = LayerEntity.Leds.RemoveAll(led => matchesIdentifier(led.DeviceIdentifier));
+        if (removedLeds == 0 && removedMissing == 0 && removedEntities == 0)
+            return false;
+
+        CalculateRenderProperties();
+        return true;
     }
 
     internal void PopulateLeds(IEnumerable<ArtemisDevice> devices)

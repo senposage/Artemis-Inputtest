@@ -32,6 +32,8 @@ public class DevicesTabViewModel : RoutableScreen
         _deviceVmFactory = deviceVmFactory;
 
         Devices = [];
+        MissingDevices = [];
+        MissingStoredDevices = [];
         this.WhenActivated(disposables =>
         {
             GetDevices();
@@ -42,10 +44,18 @@ public class DevicesTabViewModel : RoutableScreen
             Observable.FromEventPattern<DeviceEventArgs>(x => _deviceService.DeviceRemoved += x, x => _deviceService.DeviceRemoved -= x)
                 .Subscribe(d => RemoveDevice(d.EventArgs.Device))
                 .DisposeWith(disposables);
+            Observable.FromEventPattern<DeviceEventArgs>(x => _deviceService.DeviceForgotten += x, x => _deviceService.DeviceForgotten -= x)
+                .Subscribe(d => Dispatcher.UIThread.Post(() => RemoveMissingDevice(d.EventArgs.Device)))
+                .DisposeWith(disposables);
+            Observable.FromEventPattern(x => _deviceService.MissingStoredDevicesChanged += x, x => _deviceService.MissingStoredDevicesChanged -= x)
+                .Subscribe(_ => RefreshMissingStoredDevices())
+                .DisposeWith(disposables);
         });
     }
 
     public ObservableCollection<DeviceSettingsViewModel> Devices { get; }
+    public ObservableCollection<DeviceSettingsViewModel> MissingDevices { get; }
+    public ObservableCollection<StoredDeviceSettingsViewModel> MissingStoredDevices { get; }
 
     public async Task<bool> ShowDeviceDisableDialog()
     {
@@ -66,26 +76,58 @@ public class DevicesTabViewModel : RoutableScreen
     private void GetDevices()
     {
         Devices.Clear();
-        Dispatcher.UIThread.InvokeAsync(() => { Devices.AddRange(_deviceService.Devices.Select(d => _deviceVmFactory.DeviceSettingsViewModel(d, this))); }, DispatcherPriority.Background);
+        MissingDevices.Clear();
+        MissingStoredDevices.Clear();
+        Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            Devices.AddRange(_deviceService.Devices.Select(d => _deviceVmFactory.DeviceSettingsViewModel(d, this)));
+            MissingDevices.AddRange(_deviceService.MissingDevices.Select(d => _deviceVmFactory.DeviceSettingsViewModel(d, this)));
+            MissingStoredDevices.AddRange(_deviceService.MissingStoredDevices.Select(d => new StoredDeviceSettingsViewModel(d, _deviceService, _windowService)));
+        }, DispatcherPriority.Background);
     }
 
     private void AddDevice(ArtemisDevice device)
     {
-        // If the device was only enabled, don't add it
-        if (Devices.Any(d => d.Device == device))
-            return;
+        Dispatcher.UIThread.Post(() =>
+        {
+            RemoveMissingDevice(device);
+            // If the device was only enabled, don't add it
+            if (Devices.Any(d => d.Device == device))
+                return;
 
-        Devices.Add(_deviceVmFactory.DeviceSettingsViewModel(device, this));
+            Devices.Add(_deviceVmFactory.DeviceSettingsViewModel(device, this));
+        });
     }
 
     private void RemoveDevice(ArtemisDevice device)
     {
-        // If the device was only disabled don't remove it
-        if (_deviceService.Devices.Contains(device))
-            return;
+        Dispatcher.UIThread.Post(() =>
+        {
+            // If the device was only disabled don't remove it
+            if (_deviceService.Devices.Contains(device))
+                return;
 
-        DeviceSettingsViewModel? viewModel = Devices.FirstOrDefault(i => i.Device == device);
+            DeviceSettingsViewModel? viewModel = Devices.FirstOrDefault(i => i.Device == device);
+            if (viewModel != null)
+                Devices.Remove(viewModel);
+            if (_deviceService.MissingDevices.Contains(device) && MissingDevices.All(i => i.Device != device))
+                MissingDevices.Add(_deviceVmFactory.DeviceSettingsViewModel(device, this));
+        });
+    }
+
+    private void RemoveMissingDevice(ArtemisDevice device)
+    {
+        DeviceSettingsViewModel? viewModel = MissingDevices.FirstOrDefault(i => i.Device == device);
         if (viewModel != null)
-            Devices.Remove(viewModel);
+            MissingDevices.Remove(viewModel);
+    }
+
+    private void RefreshMissingStoredDevices()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            MissingStoredDevices.Clear();
+            MissingStoredDevices.AddRange(_deviceService.MissingStoredDevices.Select(d => new StoredDeviceSettingsViewModel(d, _deviceService, _windowService)));
+        });
     }
 }

@@ -33,6 +33,7 @@ public partial class DeviceSettingsViewModel : ActivatableViewModelBase
         Type = Device.DeviceType.ToString().Humanize();
         Name = Device.RgbDevice.DeviceInfo.Model;
         Manufacturer = Device.RgbDevice.DeviceInfo.Manufacturer;
+        IsMissing = !Device.IsConnected;
 
         DetectInput = ReactiveCommand.CreateFromTask(ExecuteDetectInput, this.WhenAnyValue(vm => vm.CanDetectInput));
     }
@@ -42,6 +43,7 @@ public partial class DeviceSettingsViewModel : ActivatableViewModelBase
     public string Type { get; }
     public string Name { get; }
     public string Manufacturer { get; }
+    public bool IsMissing { get; }
 
     public bool CanDetectInput => Device.DeviceType is RGBDeviceType.Keyboard or RGBDeviceType.Mouse;
     public ReactiveCommand<Unit, Unit> DetectInput { get; }
@@ -65,6 +67,20 @@ public partial class DeviceSettingsViewModel : ActivatableViewModelBase
     public async Task ViewProperties()
     {
         await _windowService.ShowDialogAsync(_deviceVmFactory.DevicePropertiesViewModel(Device));
+    }
+
+    public async Task ForgetDevice()
+    {
+        if (!IsMissing)
+            return;
+
+        bool confirmed = await _windowService.ShowConfirmContentDialog(
+            "Remove missing device",
+            $"Permanently remove {Name}? Its saved settings and all layer bindings will be deleted. This cannot be undone.",
+            "Remove",
+            "Cancel");
+        if (confirmed)
+            _deviceService.ForgetDevice(Device);
     }
 
     private async Task ExecuteDetectInput()

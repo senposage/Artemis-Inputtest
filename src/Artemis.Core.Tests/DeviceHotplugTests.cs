@@ -2,6 +2,7 @@ using Artemis.Core.DeviceProviders;
 using Artemis.Core.Providers;
 using Artemis.Core.Services;
 using Artemis.Storage.Entities.Surface;
+using Artemis.Storage.Entities.Plugins;
 using Artemis.Storage.Repositories.Interfaces;
 using NSubstitute;
 using RGB.NET.Core;
@@ -18,7 +19,9 @@ public class DeviceHotplugTests
         TestRgbDevice original = new("mouse-a");
         TestRgbProvider rgbProvider = new(original);
         TestArtemisProvider provider = new(rgbProvider) {IsEnabled = true};
-        DeviceService service = CreateDeviceService();
+        IDeviceRepository repository = Substitute.For<IDeviceRepository>();
+        repository.Get(Arg.Any<string>()).Returns(call => CreateEntity(call.Arg<string>()));
+        DeviceService service = CreateDeviceService(repository);
 
         int disconnected = 0;
         int reconnected = 0;
@@ -28,22 +31,113 @@ public class DeviceHotplugTests
 
         ArtemisDevice logicalDevice = Assert.Single(service.Devices);
         ArtemisLed logicalLed = Assert.Single(logicalDevice.Leds);
+        int added = 0;
+        int removed = 0;
+        service.DeviceAdded += (_, _) => added++;
+        service.DeviceRemoved += (_, _) => removed++;
 
         rgbProvider.Disconnect(original);
 
         Assert.False(logicalDevice.IsConnected);
-        Assert.Same(logicalDevice, Assert.Single(service.Devices));
+        Assert.Empty(service.Devices);
+        Assert.Same(logicalDevice, Assert.Single(service.MissingDevices));
         Assert.Equal(1, disconnected);
+        Assert.Equal(1, removed);
+
+        service.SaveDevices();
+        repository.Received(1).SaveRange(Arg.Is<IEnumerable<DeviceEntity>>(entities =>
+            entities.Count() == 1 && ReferenceEquals(entities.Single(), logicalDevice.DeviceEntity)));
 
         TestRgbDevice replacement = new("mouse-a");
         rgbProvider.Connect(replacement);
 
         Assert.True(logicalDevice.IsConnected);
         Assert.Same(logicalDevice, Assert.Single(service.Devices));
+        Assert.Empty(service.MissingDevices);
         Assert.Same(logicalLed, Assert.Single(logicalDevice.Leds));
         Assert.Same(replacement, logicalDevice.RgbDevice);
+        Assert.Same(logicalDevice.DeviceEntity, service.Devices.Single().DeviceEntity);
         Assert.Same(replacement.Single(), logicalLed.RgbLed);
         Assert.Equal(1, reconnected);
+        Assert.Equal(1, added);
+        repository.DidNotReceiveWithAnyArgs().Remove(default!);
+        repository.Received(1).Get("test:mouse-a");
+    }
+
+    [Fact]
+    public void SavedMissingDeviceIsClaimedImmediatelyWhenItReconnects()
+    {
+        DeviceEntity stored = CreateEntity("test:mouse-a");
+        IDeviceRepository repository = Substitute.For<IDeviceRepository>();
+        repository.GetAll().Returns([stored]);
+        repository.Get("test:mouse-a").Returns(stored);
+        DeviceService service = CreateDeviceService(repository);
+
+        Assert.Same(stored, Assert.Single(service.MissingStoredDevices));
+
+        TestRgbDevice rgbDevice = new("mouse-a");
+        service.AddDeviceProvider(new TestArtemisProvider(new TestRgbProvider(rgbDevice)) {IsEnabled = true});
+
+        Assert.Empty(service.MissingStoredDevices);
+        Assert.Same(rgbDevice, Assert.Single(service.Devices).RgbDevice);
+    }
+
+    [Fact]
+    public void MissingDevicesCanBePermanentlyForgotten()
+    {
+        DeviceEntity stored = CreateEntity("test:lost-device");
+        IDeviceRepository repository = Substitute.For<IDeviceRepository>();
+        repository.GetAll().Returns([stored]);
+        DeviceService service = CreateDeviceService(repository);
+        int forgotten = 0;
+        service.StoredDeviceForgotten += (_, args) =>
+        {
+            Assert.Same(stored, args.DeviceEntity);
+            forgotten++;
+        };
+
+        service.ForgetDevice(stored);
+
+        Assert.Empty(service.MissingStoredDevices);
+        repository.Received(1).Remove(stored);
+        Assert.Equal(1, forgotten);
+    }
+
+    [Fact]
+    public void DeviceMissingAfterHotplugCanBePermanentlyForgotten()
+    {
+        TestRgbDevice rgbDevice = new("lost-mouse");
+        TestRgbProvider rgbProvider = new(rgbDevice);
+        IDeviceRepository repository = Substitute.For<IDeviceRepository>();
+        repository.Get(Arg.Any<string>()).Returns(call => CreateEntity(call.Arg<string>()));
+        DeviceService service = CreateDeviceService(repository);
+        service.AddDeviceProvider(new TestArtemisProvider(rgbProvider) {IsEnabled = true});
+        ArtemisDevice device = Assert.Single(service.Devices);
+
+        rgbProvider.Disconnect(rgbDevice);
+        service.ForgetDevice(device);
+
+        Assert.Empty(service.MissingDevices);
+        repository.Received(1).Remove(device.DeviceEntity);
+    }
+
+    [Fact]
+    public void DuplicateProviderSnapshotCreatesOneLogicalDeviceAndOneDatabaseIdentity()
+    {
+        TestRgbDevice stale = new("mainboard-a");
+        TestRgbDevice replacement = new("mainboard-a");
+        TestRgbProvider rgbProvider = new(stale, replacement);
+        TestArtemisProvider provider = new(rgbProvider) {IsEnabled = true};
+        IDeviceRepository repository = Substitute.For<IDeviceRepository>();
+        repository.Get(Arg.Any<string>()).Returns(call => CreateEntity(call.Arg<string>()));
+        DeviceService service = CreateDeviceService(repository);
+
+        service.AddDeviceProvider(provider);
+
+        ArtemisDevice device = Assert.Single(service.Devices);
+        Assert.Same(replacement, device.RgbDevice);
+        Assert.Single(service.Devices.Select(d => d.DeviceEntity.Id).Distinct());
+        repository.Received(1).Get("test:mainboard-a");
     }
 
     [Fact]
@@ -58,6 +152,8 @@ public class DeviceHotplugTests
         ArtemisDevice logicalDevice = Assert.Single(service.Devices);
         DeviceEntity entity = logicalDevice.DeviceEntity;
         TestRgbDevice replacement = new("mouse-a");
+        int added = 0;
+        service.DeviceAdded += (_, _) => added++;
 
         rgbProvider.Connect(replacement);
 
@@ -66,6 +162,7 @@ public class DeviceHotplugTests
         Assert.Same(replacement, logicalDevice.RgbDevice);
         Assert.True(logicalDevice.IsConnected);
         Assert.Single(service.Devices.Select(device => device.DeviceEntity.Id).Distinct());
+        Assert.Equal(0, added);
     }
 
     [Fact]
@@ -85,6 +182,8 @@ public class DeviceHotplugTests
 
         rgbProvider.Disconnect(first);
         rgbProvider.Disconnect(second);
+
+        Assert.Empty(service.Devices);
 
         TestRgbDevice secondReplacement = new("bulb-b");
         TestRgbDevice firstReplacement = new("bulb-a");
@@ -125,6 +224,7 @@ public class DeviceHotplugTests
         ArtemisLed logicalLed = Assert.Single(logicalDevice.Leds);
 
         service.RemoveDeviceProvider(originalProvider);
+        Assert.Empty(service.Devices);
         TestRgbDevice replacement = new("mouse-a");
         TestArtemisProvider replacementProvider = new(new TestRgbProvider(replacement)) {IsEnabled = true};
         service.AddDeviceProvider(replacementProvider);
@@ -160,10 +260,10 @@ public class DeviceHotplugTests
         Assert.Contains(LedId.LedStripe3, logicalDevice.LedIds.Keys);
     }
 
-    private static DeviceService CreateDeviceService()
+    private static DeviceService CreateDeviceService(IDeviceRepository? repository = null)
     {
         IPluginManagementService pluginManagementService = Substitute.For<IPluginManagementService>();
-        IDeviceRepository repository = Substitute.For<IDeviceRepository>();
+        repository ??= Substitute.For<IDeviceRepository>();
         repository.Get(Arg.Any<string>()).Returns(call => CreateEntity(call.Arg<string>()));
         IRenderService renderService = Substitute.For<IRenderService>();
         ILogger logger = new LoggerConfiguration().CreateLogger();
@@ -187,9 +287,20 @@ public class DeviceHotplugTests
         };
     }
 
-    private sealed class TestArtemisProvider(TestRgbProvider rgbProvider) : DeviceProvider
+    private sealed class TestArtemisProvider : DeviceProvider
     {
-        public override IRGBDeviceProvider RgbDeviceProvider => rgbProvider;
+        private static readonly Plugin TestPlugin = new(
+            new PluginInfo {Guid = Guid.Parse("5d56f8da-ffb2-4d2d-bb5f-a175ab53a260"), Name = "Test", Version = "1.0.0", Main = "Test.dll"},
+            new DirectoryInfo(AppContext.BaseDirectory), new PluginEntity(), false);
+        private readonly TestRgbProvider _rgbProvider;
+
+        public TestArtemisProvider(TestRgbProvider rgbProvider)
+        {
+            _rgbProvider = rgbProvider;
+            Plugin = TestPlugin;
+        }
+
+        public override IRGBDeviceProvider RgbDeviceProvider => _rgbProvider;
         public override string GetDeviceIdentifier(IRGBDevice device) => $"test:{((TestDeviceInfo) device.DeviceInfo).StableId}";
         public override void Enable() { }
         public override void Disable() { }

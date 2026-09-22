@@ -46,6 +46,8 @@ internal class ProfileService : IProfileService
         ProfileCategories = new ReadOnlyCollection<ProfileCategory>(_profileCategoryRepository.GetAll().Select(c => new ProfileCategory(c)).OrderBy(c => c.Order).ToList());
 
         _deviceService.LedsChanged += DeviceServiceOnLedsChanged;
+        _deviceService.DeviceForgotten += DeviceServiceOnDeviceForgotten;
+        _deviceService.StoredDeviceForgotten += DeviceServiceOnStoredDeviceForgotten;
         _pluginManagementService.PluginFeatureEnabled += PluginManagementServiceOnPluginFeatureToggled;
         _pluginManagementService.PluginFeatureDisabled += PluginManagementServiceOnPluginFeatureToggled;
 
@@ -61,6 +63,50 @@ internal class ProfileService : IProfileService
     public bool UpdateFocusProfile { get; set; }
 
     public bool ProfileRenderingDisabled { get; set; }
+
+    private void DeviceServiceOnDeviceForgotten(object? sender, DeviceEventArgs e)
+    {
+        RemoveDeviceBindings(identifier => e.Device.MatchesIdentifier(identifier));
+    }
+
+    private void DeviceServiceOnStoredDeviceForgotten(object? sender, StoredDeviceEventArgs e)
+    {
+        RemoveDeviceBindings(identifier => identifier == e.DeviceEntity.Id);
+    }
+
+    private void RemoveDeviceBindings(Func<string, bool> matchesIdentifier)
+    {
+        List<ProfileContainerEntity> changedProfiles = [];
+        foreach (ProfileConfiguration configuration in ProfileCategories.SelectMany(category => category.ProfileConfigurations))
+        {
+            bool changed;
+            if (configuration.Profile != null)
+            {
+                changed = false;
+                foreach (Layer layer in configuration.Profile.GetAllLayers())
+                    changed |= layer.RemoveDeviceBindings(matchesIdentifier);
+            }
+            else
+                changed = configuration.Entity.Profile.Layers
+                    .SelectMany(layer => layer.Leds)
+                    .Where(led => matchesIdentifier(led.DeviceIdentifier))
+                    .ToList()
+                    .Count > 0;
+
+            // Inactive profiles have no Layer models, so clean their persisted entities directly.
+            if (configuration.Profile == null && changed)
+            {
+                foreach (LayerEntity layer in configuration.Entity.Profile.Layers)
+                    layer.Leds.RemoveAll(led => matchesIdentifier(led.DeviceIdentifier));
+            }
+
+            if (changed)
+                changedProfiles.Add(configuration.Entity);
+        }
+
+        if (changedProfiles.Count > 0)
+            _profileRepository.SaveRange(changedProfiles);
+    }
 
     /// <inheritdoc />
     public void UpdateProfiles(double deltaTime)

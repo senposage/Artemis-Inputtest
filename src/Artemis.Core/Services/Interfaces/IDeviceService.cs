@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using Artemis.Core.DeviceProviders;
+using Artemis.Storage.Entities.Surface;
 
 namespace Artemis.Core.Services;
 
@@ -20,9 +21,20 @@ public interface IDeviceService : IArtemisService
     IReadOnlyCollection<ArtemisDevice> EnabledDevices { get; }
 
     /// <summary>
-    ///     Gets a read-only collection containing all registered devices
+    ///     Gets a read-only collection containing all currently connected devices.
+    ///     Disconnected logical identities are retained internally so their bindings can be restored.
     /// </summary>
     IReadOnlyCollection<ArtemisDevice> Devices { get; }
+
+    /// <summary>
+    ///     Gets disconnected devices whose persistent identities and bindings are retained for reconnection.
+    /// </summary>
+    IReadOnlyCollection<ArtemisDevice> MissingDevices { get; }
+
+    /// <summary>
+    ///     Gets saved device records which have not been claimed by a connected device in this session.
+    /// </summary>
+    IReadOnlyCollection<DeviceEntity> MissingStoredDevices { get; }
 
     /// <summary>
     ///     Identifies the device by making it blink white 5 times
@@ -73,6 +85,16 @@ public interface IDeviceService : IArtemisService
     void SaveDevice(ArtemisDevice artemisDevice);
 
     /// <summary>
+    ///     Permanently removes a missing device and notifies consumers to purge its saved bindings.
+    /// </summary>
+    void ForgetDevice(ArtemisDevice artemisDevice);
+
+    /// <summary>
+    ///     Permanently removes a saved device which has not appeared in this session.
+    /// </summary>
+    void ForgetDevice(DeviceEntity deviceEntity);
+
+    /// <summary>
     ///     Saves the configuration of all current devices to persistent storage
     /// </summary>
     void SaveDevices();
@@ -106,6 +128,21 @@ public interface IDeviceService : IArtemisService
     ///     Occurs when a disconnected device receives a new live provider backing.
     /// </summary>
     event EventHandler<DeviceEventArgs> DeviceReconnected;
+
+    /// <summary>
+    ///     Occurs after a missing device has been permanently removed from storage.
+    /// </summary>
+    event EventHandler<DeviceEventArgs> DeviceForgotten;
+
+    /// <summary>
+    ///     Occurs after an unclaimed saved device has been permanently removed.
+    /// </summary>
+    event EventHandler<StoredDeviceEventArgs> StoredDeviceForgotten;
+
+    /// <summary>
+    ///     Occurs when the set of unclaimed saved device records changes.
+    /// </summary>
+    event EventHandler MissingStoredDevicesChanged;
 
     /// <summary>
     ///     Occurs when a single device was disabled

@@ -19,6 +19,7 @@
                                      Device="{CompiledBinding Device}"
                                      RenderOptions.BitmapInterpolationMode="MediumQuality" />
             <Button Grid.Row="0"
+                    IsVisible="{CompiledBinding !IsMissing}"
                     Classes="icon-button icon-button-large"
                     VerticalAlignment="Bottom"
                     HorizontalAlignment="Right"
@@ -32,13 +33,14 @@
                 <StackPanel>
                     <TextBlock TextWrapping="Wrap" Classes="subtitle" Text="{CompiledBinding Device.RgbDevice.DeviceInfo.Manufacturer, Mode=OneWay}" />
                     <TextBlock TextWrapping="Wrap" Classes="subtitle" Text="{CompiledBinding Device.DeviceType, Mode=OneWay}" />
+                    <TextBlock IsVisible="{CompiledBinding IsMissing}" Foreground="GoldenRod" Text="Missing" />
                 </StackPanel>
             </StackPanel>
 
             <Grid Grid.Row="2" Margin="10" ColumnDefinitions="25,*">
-                <CheckBox IsChecked="{CompiledBinding IsDeviceEnabled}" />
+                <CheckBox IsVisible="{CompiledBinding !IsMissing}" IsChecked="{CompiledBinding IsDeviceEnabled}" />
 
-                <SplitButton Grid.Column="1" Content="Properties" Command="{CompiledBinding ViewProperties}" HorizontalAlignment="Right">
+                <SplitButton IsVisible="{CompiledBinding !IsMissing}" Grid.Column="1" Content="Properties" Command="{CompiledBinding ViewProperties}" HorizontalAlignment="Right">
                     <SplitButton.Flyout>
                         <MenuFlyout Placement="Bottom">
                             <MenuItem Header="Open plugin directory" Command="{CompiledBinding OpenPluginDirectory}">
@@ -54,6 +56,11 @@
                         </MenuFlyout>
                     </SplitButton.Flyout>
                 </SplitButton>
+                <Button IsVisible="{CompiledBinding IsMissing}"
+                        Grid.ColumnSpan="2"
+                        HorizontalAlignment="Right"
+                        Content="Remove"
+                        Command="{CompiledBinding ForgetDevice}" />
             </Grid>
         </Grid>
     </Border>

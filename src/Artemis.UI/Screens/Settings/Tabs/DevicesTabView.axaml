@@ -22,6 +22,33 @@
                     </ItemsPanelTemplate>
                 </ItemsControl.ItemsPanel>
             </ItemsControl>
+
+            <TextBlock Classes="h4" Margin="0 30 0 0">Missing devices</TextBlock>
+            <TextBlock TextWrapping="Wrap">
+                Disconnected devices are hidden from the active surface but kept here so their settings and layer bindings can be restored if they return.
+            </TextBlock>
+            <ItemsControl ItemsSource="{CompiledBinding MissingDevices}" Margin="0 15 0 0">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                        <WrapPanel />
+                    </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+            </ItemsControl>
+            <ItemsControl ItemsSource="{CompiledBinding MissingStoredDevices}" Margin="0 10 0 0">
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="settings:StoredDeviceSettingsViewModel">
+                        <Border Classes="card" Padding="15" Margin="0 0 0 10">
+                            <Grid ColumnDefinitions="*,Auto">
+                                <StackPanel>
+                                    <TextBlock FontWeight="SemiBold" Text="Saved missing device" />
+                                    <TextBlock TextWrapping="Wrap" Text="{CompiledBinding Identifier}" />
+                                </StackPanel>
+                                <Button Grid.Column="1" Margin="15 0 0 0" Content="Remove" Command="{CompiledBinding ForgetDevice}" />
+                            </Grid>
+                        </Border>
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
         </StackPanel>
     </ScrollViewer>
 </UserControl>
