@@ -539,9 +539,24 @@ internal class DeviceService : IDeviceService
 
     private void HandleRuntimeDeviceRemoved(DeviceProvider deviceProvider, IRGBDevice rgbDevice)
     {
+        string identifier = deviceProvider.GetDeviceIdentifier(rgbDevice);
         ArtemisDevice? device;
         lock (_devicesLock)
+        {
             device = _devices.FirstOrDefault(d => ReferenceEquals(d.DeviceProvider, deviceProvider) && ReferenceEquals(d.RgbDevice, rgbDevice));
+            if (device == null)
+            {
+                // Some providers reconstruct the object used in their remove notification.
+                // Fall back to stable identity, but only when no live object with that identity
+                // remains. This preserves the add-before-remove rescan case.
+                ArtemisDevice? identityMatch = _devices.FirstOrDefault(d => IsSameProvider(d.DeviceProvider, deviceProvider) && d.Identifier == identifier);
+                bool replacementStillPresent = identityMatch != null && deviceProvider.RgbDeviceProvider.Devices.Any(candidate =>
+                    ReferenceEquals(candidate, identityMatch.RgbDevice) ||
+                    (!ReferenceEquals(candidate, rgbDevice) && deviceProvider.GetDeviceIdentifier(candidate) == identifier));
+                if (!replacementStillPresent)
+                    device = identityMatch;
+            }
+        }
         if (device == null || !device.IsConnected)
             return;
 

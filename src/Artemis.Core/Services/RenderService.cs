@@ -174,6 +174,12 @@ internal class RenderService : IRenderService, IRenderer, IDisposable
         _surfaceManager.RemoveDevices(e.Devices);
     }
 
+    private void DeviceServiceOnDeviceAdded(object? sender, DeviceEventArgs e)
+    {
+        if (e.Device.IsEnabled)
+            _surfaceManager.AddDevices(new List<ArtemisDevice> {e.Device});
+    }
+
     private void DeviceServiceOnDeviceEnabled(object? sender, DeviceEventArgs e)
     {
         _surfaceManager.AddDevices(new List<ArtemisDevice> {e.Device});
@@ -241,6 +247,9 @@ internal class RenderService : IRenderService, IRenderer, IDisposable
         
         _deviceService.DeviceProviderAdded += DeviceServiceOnDeviceProviderAdded;
         _deviceService.DeviceProviderRemoved += DeviceServiceOnDeviceProviderRemoved;
+        // Provider-added handles the initial batch. Device-added is also required for a
+        // genuinely new device reported later by a provider's hotplug event.
+        _deviceService.DeviceAdded += DeviceServiceOnDeviceAdded;
         _deviceService.DeviceEnabled += DeviceServiceOnDeviceEnabled;
         _deviceService.DeviceDisabled += DeviceServiceOnDeviceDisabled;
         _deviceService.DeviceDisconnected += DeviceServiceOnDeviceDisconnected;

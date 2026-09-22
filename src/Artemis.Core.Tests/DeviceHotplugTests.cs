@@ -122,6 +122,55 @@ public class DeviceHotplugTests
     }
 
     [Fact]
+    public void RendererAttachesGenuinelyNewRuntimeDevice()
+    {
+        var previousStartupArguments = Constants.StartupArguments;
+        try
+        {
+            Constants.StartupArguments = new List<string>().AsReadOnly();
+            IDeviceService deviceService = Substitute.For<IDeviceService>();
+            deviceService.EnabledDevices.Returns([]);
+            ISettingsService settingsService = Substitute.For<ISettingsService>();
+            settingsService.GetSetting("Core.TargetFrameRate", 30).Returns(CreateSetting("Core.TargetFrameRate", 30));
+            settingsService.GetSetting("Core.RenderScale", 0.5).Returns(CreateSetting("Core.RenderScale", 0.5));
+            settingsService.GetSetting("Core.PreferredGraphicsContext", "Software").Returns(CreateSetting("Core.PreferredGraphicsContext", "Software"));
+            CoreRenderer coreRenderer = new(Substitute.For<IModuleService>(), Substitute.For<IProfileService>());
+            using RenderService renderService = new(new LoggerConfiguration().CreateLogger(), settingsService, deviceService, coreRenderer,
+                new global::DryIoc.LazyEnumerable<IGraphicsContextProvider>([]));
+            renderService.Initialize();
+
+            TestRgbDevice rgbDevice = new("new-mouse");
+            ArtemisDevice device = new(rgbDevice, new TestArtemisProvider(new TestRgbProvider(rgbDevice)) {IsEnabled = true});
+            deviceService.DeviceAdded += Raise.Event<EventHandler<DeviceEventArgs>>(deviceService, new DeviceEventArgs(device));
+
+            Assert.Contains(rgbDevice, renderService.Surface.Devices);
+        }
+        finally
+        {
+            Constants.StartupArguments = previousStartupArguments;
+        }
+    }
+
+    [Fact]
+    public void GenuinelyNewRuntimeDeviceMovesToMissingImmediatelyWhenUnplugged()
+    {
+        TestRgbDevice keyboard = new("keyboard-a");
+        TestRgbProvider rgbProvider = new(keyboard);
+        DeviceService service = CreateDeviceService();
+        service.AddDeviceProvider(new TestArtemisProvider(rgbProvider) {IsEnabled = true});
+
+        TestRgbDevice mouse = new("g502-hero");
+        rgbProvider.Connect(mouse);
+        ArtemisDevice mouseDevice = service.Devices.Single(device => device.Identifier == "test:g502-hero");
+
+        rgbProvider.Disconnect(mouse);
+
+        Assert.Equal("test:keyboard-a", Assert.Single(service.Devices).Identifier);
+        Assert.Same(mouseDevice, Assert.Single(service.MissingDevices));
+        Assert.False(mouseDevice.IsConnected);
+    }
+
+    [Fact]
     public void DuplicateProviderSnapshotCreatesOneLogicalDeviceAndOneDatabaseIdentity()
     {
         TestRgbDevice stale = new("mainboard-a");
@@ -285,6 +334,12 @@ public class DeviceHotplugTests
             BlueScale = 1,
             LayoutType = NoneLayoutProvider.LAYOUT_TYPE
         };
+    }
+
+    private static PluginSetting<T> CreateSetting<T>(string name, T value)
+    {
+        IPluginRepository repository = Substitute.For<IPluginRepository>();
+        return new PluginSetting<T>(repository, new PluginSettingEntity {Name = name, Value = CoreJson.Serialize(value)});
     }
 
     private sealed class TestArtemisProvider : DeviceProvider
