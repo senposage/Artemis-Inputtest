@@ -4,3 +4,5 @@
   href: getting-started.md
 - name: Device Provider Lifecycle
   href: device-provider-lifecycle.md
+- name: Device Hotplug Recovery
+  href: device-hotplug-recovery.md
