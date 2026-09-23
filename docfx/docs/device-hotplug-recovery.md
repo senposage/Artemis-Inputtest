@@ -32,7 +32,7 @@ The lifecycle now follows these rules:
 2. Temporary transport or discovery loss does not delete logical state.
 3. A returning device reuses the existing device, LED objects, and bindings
    whenever its stable identity can be proven.
-4. Removal is delayed long enough to ignore ordinary scan churn.
+4. Missing-state presentation is delayed to ignore ordinary scan churn.
 5. Permanently absent devices remain visible in **Settings > Devices** until the
    user explicitly removes them.
 6. Split children are classified using their physical parent, so obsolete zone
@@ -57,9 +57,10 @@ a new logical device, a replacement backing object, or a temporary absence.
 
 ## Persistent identity and deduplication
 
-`DeviceProvider.GetDeviceIdentifier` is the authoritative persistence key. Core
-uses the same identifier for startup discovery, database lookup, runtime add
-events, reconnects, and provider reloads.
+`DeviceProvider.GetDeviceIdentifier` supplies the primary provider identifier.
+Core uses it for startup discovery, database lookup, runtime add events,
+reconnects, and provider reloads. The database entity `Id` remains stable even
+when a provider later supplies a different runtime identifier.
 
 For OpenRGB, the key contains the server identity, stable controller identity,
 and, when split, the exact zone or segment index. It does not depend on the
@@ -76,6 +77,21 @@ Legacy RGB.NET identifiers may be retained as aliases so old profile records can
 resolve after an identity migration. An alias is a compatibility lookup; it is
 not permission to merge two simultaneously reported physical devices.
 
+When the exact identifier changes, a provider may also supply an opaque
+`GetReconnectionSignature`. Artemis persists this signature and identifier
+aliases with the device row. It looks for a unique matching logical device
+among disconnected devices, including those still in the removal grace period,
+or among unclaimed saved rows after an application restart. A match rebinds the
+existing Artemis device and LEDs instead of creating a new row. If multiple
+missing devices have the same signature, Artemis does not guess. A currently
+connected device is not matched by signature, so two simultaneously connected
+devices of the same model remain separate.
+
+The OpenRGB signature uses SDK-reported server, manufacturer, model, device
+type, split-part identity, and LED IDs. It does not parse or hardcode USB
+VID/PID values. If those properties cannot distinguish two missing devices,
+manual recovery may still be necessary.
+
 ## Device states
 
 | State | Physical output | Artemis state | User presentation |
@@ -84,8 +100,8 @@ not permission to merge two simultaneously reported physical devices.
 | Grace period | Temporarily paused | Existing logical objects retained | Treated as transient |
 | Missing | Inactive | Entity, layout, LEDs, and bindings retained | Settings > Devices |
 
-When the same identifier returns, Artemis cancels any pending removal and
-rebinds the replacement RGB.NET object. If the device had reached Missing,
+When an exact identifier or unique reconnection signature returns, Artemis
+cancels any pending removal and rebinds the replacement RGB.NET object. If the device had reached Missing,
 Artemis also refreshes the render surface so deferred layer bindings become
 active immediately; no Artemis or OpenRGB restart is required.
 
@@ -93,13 +109,14 @@ active immediately; no Artemis or OpenRGB restart is required.
 
 Runtime removals wait eight seconds before becoming Missing. A matching add
 during that window cancels the removal. The delay is intentionally generous:
-OpenRGB detection may briefly omit devices, particularly controllers late in
-the detection order. It also accommodates controllers such as the Roccat
-Vulcan II Max that can take roughly six seconds to initialize after a rescan.
+OpenRGB detection may briefly omit devices, particularly SDK devices late in
+the detection order. The observed Vulcan II Max return time is now around two
+seconds, but the grace still covers slower transient scans.
 
-The grace period is core protection and applies after a provider publishes a
-remove event. The OpenRGB plugin adds a second layer of protection by refusing
-to publish intermediate scan results as final.
+The grace period only delays presentation as Missing; it does not control
+identity matching. A device returning with a changed runtime path can reclaim
+its logical identity during the grace period. The OpenRGB plugin separately
+refuses to publish intermediate scan results as final.
 
 ## OpenRGB detection handling
 
@@ -175,7 +192,8 @@ saved identity is intentionally being discarded.
 
 1. Provider reports remove.
 2. Artemis starts the eight-second timer and retains the logical device.
-3. Provider reports the same identifier before the timer expires.
+3. Provider reports the same identifier or a uniquely matching signature before
+   the timer expires.
 4. Artemis cancels removal and rebinds the backing object.
 5. Rendering continues with the existing profile bindings.
 
@@ -183,7 +201,8 @@ saved identity is intentionally being discarded.
 
 1. Provider reports remove and no matching add arrives during the grace period.
 2. Artemis moves the retained device to Missing without deleting persistence.
-3. The device later returns with the same identifier.
+3. The device later returns with the same identifier or a uniquely matching
+   persisted signature.
 4. Artemis reactivates the retained logical device and refreshes LEDs.
 5. Existing bindings resume automatically.
 
@@ -200,9 +219,9 @@ saved identity is intentionally being discarded.
 
 The implementation guarantees that a transient event does not intentionally
 delete saved state and that one provider identifier maps to one logical device.
-It cannot recover identity when an upstream provider changes every stable key or
-renumbers LEDs without a durable mapping. Display names, discovery order,
-geometry, and LED count are not considered proof of identity.
+It cannot safely recover identity when an upstream provider changes every
+useful identifier or when two missing devices have indistinguishable signatures.
+Display names or discovery order alone are not considered proof of identity.
 
 Parent-aware classification does not merge zones. A zone that returns with a
 different exact identifier is a different logical child unless the provider
@@ -214,6 +233,9 @@ offers an explicit migration path.
 
 - unplug/replug while retaining device and LED objects;
 - delayed removal and cancellation;
+- changed runtime identifiers both during the grace period and after Missing;
+- persisted signature and identifier-alias recovery after restart;
+- ambiguous same-model signatures remaining separate;
 - recovery after a device reaches Missing;
 - add-before-remove replacement ordering without duplicate entities;
 - identical devices returning in reverse order;

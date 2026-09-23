@@ -21,11 +21,14 @@ identity metadata, or remove and recreate Artemis state to recover a connection.
 
 ## Persistent identity
 
-`DeviceProvider.GetDeviceIdentifier` is the authoritative persistence key. Core
-uses it consistently for database lookup, runtime add events, and provider
-reloads. A provider may expose an old RGB.NET identifier as a migration alias,
-but aliases only allow existing profile records to resolve; they do not merge
-two simultaneously reported devices.
+`DeviceProvider.GetDeviceIdentifier` supplies the primary provider identifier.
+Core uses it consistently for database lookup, runtime add events, and provider
+reloads. A provider may expose an old RGB.NET identifier as a migration alias.
+An optional provider-owned `GetReconnectionSignature` can reconcile a uniquely
+matching disconnected or stored-missing device when that primary identifier
+changes. Core persists the signature and identifier aliases while keeping the
+original database entity key stable. It never merges two simultaneously
+connected devices by signature or guesses among ambiguous missing candidates.
 
 Core enforces one logical device per provider identifier. If a provider sends an
 add for a replacement RGB.NET object before removing the old object, Artemis
@@ -51,10 +54,11 @@ returns.
 
 ## Limits
 
-Core cannot prove identity when a provider changes its persistent device key or
-renumbers LEDs. Matching by display name, list position, geometry, or similar
-metadata risks silently binding an effect to the wrong hardware and is not part
-of the lifecycle contract.
+Core cannot prove identity when a provider changes every useful identifier or
+when several missing devices share the same signature. Matching by display name
+or list position alone risks silently binding an effect to the wrong hardware.
+The removal grace controls only when a disconnected device appears as Missing;
+signature reconciliation also works before that timer expires.
 
 ## Regression coverage
 
