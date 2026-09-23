@@ -57,7 +57,44 @@ internal class DeviceRepository(Func<ArtemisDbContext> getContext) : IDeviceRepo
     public void SaveRange(IEnumerable<DeviceEntity> deviceEntities)
     {
         using ArtemisDbContext dbContext = getContext();
-        dbContext.UpdateRange(deviceEntities);
-        dbContext.SaveChanges();
+        List<DeviceEntity> entities = deviceEntities.DistinctBy(entity => entity.Id).ToList();
+        SaveExisting(dbContext, entities);
+    }
+
+    private static void SaveExisting(ArtemisDbContext dbContext, List<DeviceEntity> entities)
+    {
+        if (entities.Count == 0)
+            return;
+
+        HashSet<string> existingIds = dbContext.Devices
+            .Where(device => entities.Select(entity => entity.Id).Contains(device.Id))
+            .Select(device => device.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        List<DeviceEntity> existingEntities = entities.Where(entity => existingIds.Contains(entity.Id)).ToList();
+        if (existingEntities.Count == 0)
+            return;
+
+        dbContext.UpdateRange(existingEntities);
+        try
+        {
+            dbContext.SaveChanges();
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            // A missing-device removal or identity migration can win the race against
+            // a UI save. Do not recreate the intentionally removed row; retry only
+            // the entries that are still present in the database.
+            dbContext.ChangeTracker.Clear();
+            existingIds = dbContext.Devices
+                .Where(device => existingEntities.Select(entity => entity.Id).Contains(device.Id))
+                .Select(device => device.Id)
+                .ToHashSet(StringComparer.Ordinal);
+            existingEntities = existingEntities.Where(entity => existingIds.Contains(entity.Id)).ToList();
+            if (existingEntities.Count == 0)
+                return;
+
+            dbContext.UpdateRange(existingEntities);
+            dbContext.SaveChanges();
+        }
     }
 }
