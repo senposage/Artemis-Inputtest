@@ -10,6 +10,7 @@ public class DeviceEntity
         InputIdentifiers = [];
         InputMappings = [];
         Categories = [];
+        IdentifierAliases = [];
     }
 
     [MaxLength(512)]
@@ -17,6 +18,13 @@ public class DeviceEntity
 
     [MaxLength(512)]
     public string DeviceProvider { get; set; } = string.Empty;
+
+    /// <summary>Opaque provider-defined value used to reconcile a stored logical device after runtime identity replacement.</summary>
+    [MaxLength(4096)]
+    public string? ReconnectionSignature { get; set; }
+
+    /// <summary>Runtime identities previously associated with this logical device.</summary>
+    public List<string> IdentifierAliases { get; set; }
 
     public float X { get; set; }
     public float Y { get; set; }

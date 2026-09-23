@@ -137,12 +137,17 @@ internal class DeviceService : IDeviceService
                 foreach (IRGBDevice rgbDevice in deviceGroups.Select(g => g.Last()))
                 {
                     string identifier = deviceProvider.GetDeviceIdentifier(rgbDevice);
+                    string? reconnectionSignature = deviceProvider.GetReconnectionSignature(rgbDevice);
                     ArtemisDevice? retained;
                     bool wasHidden;
                     lock (_devicesLock)
                     {
                         retained = _devices.Concat(_retainedDevices).FirstOrDefault(d => IsSameProvider(d.DeviceProvider, deviceProvider) &&
                                                                                         d.Identifier == identifier);
+                        // A provider can replace a device's runtime identity while a physical device is absent. In
+                        // that case retain the existing Artemis device and its bindings rather than adding a duplicate.
+                        // Signatures are provider-defined and treated as opaque by the core.
+                        retained ??= FindRetainedDeviceForReconnection(deviceProvider, reconnectionSignature);
                         wasHidden = retained != null && _retainedDevices.Contains(retained);
                     }
 
@@ -430,6 +435,7 @@ internal class DeviceService : IDeviceService
     private ArtemisDevice GetArtemisDevice(IRGBDevice rgbDevice, DeviceProvider deviceProvider)
     {
         string deviceIdentifier = deviceProvider.GetDeviceIdentifier(rgbDevice);
+        string? reconnectionSignature = deviceProvider.GetReconnectionSignature(rgbDevice);
         DeviceEntity? deviceEntity = _deviceRepository.Get(deviceIdentifier);
         string legacyIdentifier = rgbDevice.GetDeviceIdentifier();
         IEnumerable<string> legacyIdentifiers = [legacyIdentifier, ..deviceProvider.GetLegacyDeviceIdentifiers(rgbDevice)];
@@ -443,9 +449,36 @@ internal class DeviceService : IDeviceService
                 _logger.Information("Migrated device identity {LegacyIdentifier} to provider identity {Identifier}", oldIdentifier, deviceIdentifier);
         }
 
+        if (deviceEntity == null && !string.IsNullOrWhiteSpace(reconnectionSignature))
+        {
+            List<DeviceEntity> candidates;
+            lock (_devicesLock)
+            {
+                candidates = _missingStoredDevices
+                    .Where(entity => entity.DeviceProvider == deviceProvider.Plugin.Guid.ToString() &&
+                                     entity.ReconnectionSignature == reconnectionSignature)
+                    .ToList();
+            }
+
+            if (candidates.Count == 1)
+            {
+                deviceEntity = candidates.Single();
+                _logger.Information("Reconciled provider runtime identity {Identifier} to stored logical device {StoredIdentifier} using an opaque reconnection signature",
+                    deviceIdentifier, deviceEntity.Id);
+            }
+            else if (candidates.Count > 1)
+            {
+                _logger.Warning("Found {Count} stored logical devices with the same reconnection signature for {DeviceProvider}; not guessing which one owns runtime identity {Identifier}",
+                    candidates.Count, deviceProvider.GetType().Name, deviceIdentifier);
+            }
+        }
+
         ArtemisDevice device;
         if (deviceEntity != null)
         {
+            bool signatureChanged = deviceEntity.ReconnectionSignature != reconnectionSignature;
+            bool identifierAliasChanged = !deviceEntity.IdentifierAliases.Contains(deviceIdentifier);
+            deviceEntity.ReconnectionSignature = reconnectionSignature;
             bool claimedStoredDevice;
             lock (_devicesLock)
             {
@@ -462,12 +495,17 @@ internal class DeviceService : IDeviceService
             // not just during the one run in which the device row was migrated.
             if (legacyIdentifier != deviceIdentifier)
                 device.AddIdentifierAlias(legacyIdentifier);
+
+            if (signatureChanged || identifierAliasChanged)
+                _deviceRepository.Save(deviceEntity);
         }
         // Fall back on creating a new device
         else
         {
             _logger.Information("No device config found for {DeviceInfo}, device hash: {DeviceHashCode}. Adding a new entry", rgbDevice.DeviceInfo, deviceIdentifier);
             device = new ArtemisDevice(rgbDevice, deviceProvider);
+            device.DeviceEntity.ReconnectionSignature = reconnectionSignature;
+            device.AddIdentifierAlias(deviceIdentifier);
             _deviceRepository.Add(device.DeviceEntity);
         }
 
@@ -639,11 +677,15 @@ internal class DeviceService : IDeviceService
     private void HandleRuntimeDeviceAdded(DeviceProvider deviceProvider, IRGBDevice rgbDevice)
     {
         string identifier = deviceProvider.GetDeviceIdentifier(rgbDevice);
+        string? reconnectionSignature = deviceProvider.GetReconnectionSignature(rgbDevice);
         ArtemisDevice? existing;
         bool wasHidden;
         lock (_devicesLock)
         {
             existing = _devices.Concat(_retainedDevices).FirstOrDefault(d => IsSameProvider(d.DeviceProvider, deviceProvider) && d.Identifier == identifier);
+            // Reconcile every disconnected logical device, whether it is still visible during the removal grace
+            // period or has already moved to Missing. The timer only affects presentation, never identity matching.
+            existing ??= FindRetainedDeviceForReconnection(deviceProvider, reconnectionSignature, includeDisconnectedDevices: true);
             wasHidden = existing != null && _retainedDevices.Contains(existing);
         }
         if (existing != null)
@@ -663,6 +705,12 @@ internal class DeviceService : IDeviceService
             }
 
             bool topologyPreserved = existing.Rebind(rgbDevice);
+            bool identityChanged = existing.DeviceEntity.ReconnectionSignature != reconnectionSignature ||
+                                   !existing.DeviceEntity.IdentifierAliases.Contains(identifier);
+            existing.DeviceEntity.ReconnectionSignature = reconnectionSignature;
+            existing.AddIdentifierAlias(identifier);
+            if (identityChanged)
+                _deviceRepository.Save(existing.DeviceEntity);
             ActivateRetainedDevice(existing);
             if (wasHidden)
                 OnDeviceAdded(new DeviceEventArgs(existing));
@@ -695,6 +743,31 @@ internal class DeviceService : IDeviceService
         UpdateLeds();
         _logger.Information("Device provider {DeviceProvider} added runtime device {Device} with Artemis identity {Identifier}",
             deviceProvider.GetType().Name, rgbDevice.DeviceInfo.DeviceName, identifier);
+    }
+
+    private ArtemisDevice? FindRetainedDeviceForReconnection(DeviceProvider deviceProvider, string? reconnectionSignature,
+        bool includeDisconnectedDevices = false)
+    {
+        if (string.IsNullOrWhiteSpace(reconnectionSignature))
+            return null;
+
+        IEnumerable<ArtemisDevice> eligibleDevices = includeDisconnectedDevices
+            ? _retainedDevices.Concat(_devices.Where(device => !device.IsConnected))
+            : _retainedDevices;
+        List<ArtemisDevice> candidates = eligibleDevices
+            .Where(device => IsSameProvider(device.DeviceProvider, deviceProvider) &&
+                             (device.DeviceEntity.ReconnectionSignature ??
+                              deviceProvider.GetReconnectionSignature(device.RgbDevice)) == reconnectionSignature)
+            .Distinct()
+            .ToList();
+        if (candidates.Count > 1)
+        {
+            _logger.Warning("Device provider {DeviceProvider} has {Count} missing logical devices with the same reconnection signature; not guessing which one owns the replacement runtime object",
+                deviceProvider.GetType().Name, candidates.Count);
+            return null;
+        }
+
+        return candidates.SingleOrDefault();
     }
 
     private void UpdateDeviceSnapshots()

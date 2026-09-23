@@ -186,6 +186,10 @@ namespace Artemis.Storage.Migrations
                         .HasMaxLength(512)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("IdentifierAliases")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
                     b.Property<float>("GreenScale")
                         .HasColumnType("REAL");
 
@@ -220,6 +224,10 @@ namespace Artemis.Storage.Migrations
 
                     b.Property<float>("Rotation")
                         .HasColumnType("REAL");
+
+                    b.Property<string>("ReconnectionSignature")
+                        .HasMaxLength(4096)
+                        .HasColumnType("TEXT");
 
                     b.Property<float>("Scale")
                         .HasColumnType("REAL");

@@ -45,6 +45,12 @@ public class ArtemisDbContext : DbContext
             .HasConversion(
                 v => JsonSerializer.Serialize(v, JsonSerializerOptions),
                 v => JsonSerializer.Deserialize<List<InputMappingEntity>>(v, JsonSerializerOptions) ?? new List<InputMappingEntity>());
+
+        modelBuilder.Entity<DeviceEntity>()
+            .Property(e => e.IdentifierAliases)
+            .HasConversion(
+                v => JsonSerializer.Serialize(v, JsonSerializerOptions),
+                v => JsonSerializer.Deserialize<List<string>>(v, JsonSerializerOptions) ?? new List<string>());
         
         modelBuilder.Entity<EntryEntity>()
             .Property(e => e.Metadata)

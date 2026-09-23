@@ -29,6 +29,18 @@ public abstract class DeviceProvider : PluginFeature
     }
 
     /// <summary>
+    ///     Returns an opaque, provider-defined signature that may be used to reconnect a retained logical device when
+    ///     the provider replaces its runtime identity during a hardware rescan. Artemis only compares this value for
+    ///     equality; it does not interpret it as hardware data. Return <see langword="null" /> when a provider cannot
+    ///     supply a sufficiently specific signature.
+    /// </summary>
+    /// <param name="device">The RGB.NET device to describe.</param>
+    public virtual string? GetReconnectionSignature(IRGBDevice device)
+    {
+        return null;
+    }
+
+    /// <summary>
     /// Returns former persistent identifiers that should be migrated to the current identifier for this device.
     /// This is for a provider that replaces an upstream identifier known to be unstable with a durable one.
     /// </summary>

@@ -71,6 +71,12 @@ public class ArtemisDevice : CorePropertyChanged
         DeviceEntity = deviceEntity;
         DeviceProvider = deviceProvider;
 
+        foreach (string identifierAlias in DeviceEntity.IdentifierAliases)
+            _identifierAliases.Add(identifierAlias);
+        if (DeviceEntity.Id != Identifier)
+            AddIdentifierAlias(DeviceEntity.Id);
+        AddIdentifierAlias(Identifier);
+
         LedIds = new ReadOnlyDictionary<LedId, ArtemisLed>(new Dictionary<LedId, ArtemisLed>());
         Leds = new ReadOnlyCollection<ArtemisLed>(new List<ArtemisLed>());
         InputIdentifiers = [];
@@ -480,7 +486,9 @@ public class ArtemisDevice : CorePropertyChanged
     internal void Save()
     {
         // Other properties are computed
-        DeviceEntity.Id = Identifier;
+        // Keep the database key as the durable logical-device identity when a provider replaces a runtime identity.
+        if (string.IsNullOrWhiteSpace(DeviceEntity.Id))
+            DeviceEntity.Id = Identifier;
         DeviceEntity.DeviceProvider = DeviceProvider.Plugin.Guid.ToString();
 
         DeviceEntity.InputIdentifiers.Clear();
@@ -510,8 +518,13 @@ public class ArtemisDevice : CorePropertyChanged
 
     internal void AddIdentifierAlias(string identifier)
     {
+        if (string.IsNullOrWhiteSpace(identifier))
+            return;
+
         if (identifier != Identifier)
             _identifierAliases.Add(identifier);
+        if (!DeviceEntity.IdentifierAliases.Contains(identifier))
+            DeviceEntity.IdentifierAliases.Add(identifier);
     }
 
     /// <summary>

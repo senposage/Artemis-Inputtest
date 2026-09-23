@@ -72,6 +72,66 @@ public class DeviceHotplugTests
     }
 
     [Fact]
+    public void ReplugWithReplacementRuntimeIdentityRebindsRetainedLogicalDevice()
+    {
+        TestRgbDevice original = new("runtime-path-a", "same-physical-device");
+        TestRgbProvider rgbProvider = new(original);
+        IDeviceRepository repository = Substitute.For<IDeviceRepository>();
+        repository.Get(Arg.Any<string>()).Returns(call => CreateEntity(call.Arg<string>()));
+        DeviceService service = CreateDeviceService(repository);
+        service.AddDeviceProvider(new TestArtemisProvider(rgbProvider) {IsEnabled = true});
+
+        ArtemisDevice logicalDevice = Assert.Single(service.Devices);
+        ArtemisLed logicalLed = Assert.Single(logicalDevice.Leds);
+        rgbProvider.Disconnect(original);
+
+        TestRgbDevice replacement = new("runtime-path-b", "same-physical-device");
+        rgbProvider.Connect(replacement);
+
+        Assert.Same(logicalDevice, Assert.Single(service.Devices));
+        Assert.Empty(service.MissingDevices);
+        Assert.Equal("test:runtime-path-a", logicalDevice.Identifier);
+        Assert.Same(logicalLed, Assert.Single(logicalDevice.Leds));
+        Assert.Same(replacement, logicalDevice.RgbDevice);
+        repository.Received(1).Get("test:runtime-path-a");
+        repository.DidNotReceive().Get("test:runtime-path-b");
+    }
+
+    [Fact]
+    public async Task ReplacementRuntimeIdentityDuringRemovalGraceRebindsDisconnectedLogicalDevice()
+    {
+        TestRgbDevice original = new("runtime-path-a", "same-physical-device");
+        TestRgbProvider rgbProvider = new(original);
+        IDeviceRepository repository = Substitute.For<IDeviceRepository>();
+        repository.Get(Arg.Any<string>()).Returns(call => CreateEntity(call.Arg<string>()));
+        DeviceService service = CreateDeviceService(repository);
+        service.DeviceRemovalGracePeriod = TimeSpan.FromMilliseconds(150);
+        service.AddDeviceProvider(new TestArtemisProvider(rgbProvider) {IsEnabled = true});
+
+        ArtemisDevice logicalDevice = Assert.Single(service.Devices);
+        ArtemisLed logicalLed = Assert.Single(logicalDevice.Leds);
+        int removed = 0;
+        service.DeviceRemoved += (_, _) => removed++;
+
+        rgbProvider.Disconnect(original);
+        Assert.False(logicalDevice.IsConnected);
+        Assert.Empty(service.MissingDevices);
+
+        TestRgbDevice replacement = new("runtime-path-b", "same-physical-device");
+        rgbProvider.Connect(replacement);
+        await Task.Delay(250);
+
+        Assert.Same(logicalDevice, Assert.Single(service.Devices));
+        Assert.Empty(service.MissingDevices);
+        Assert.Same(logicalLed, Assert.Single(logicalDevice.Leds));
+        Assert.Same(replacement, logicalDevice.RgbDevice);
+        Assert.True(logicalDevice.IsConnected);
+        Assert.Equal(0, removed);
+        Assert.Contains("test:runtime-path-b", logicalDevice.DeviceEntity.IdentifierAliases);
+        repository.DidNotReceive().Get("test:runtime-path-b");
+    }
+
+    [Fact]
     public async Task TransientRemovalDoesNotEnterMissingOrRaiseRemoved()
     {
         TestRgbDevice original = new("mouse-a");
@@ -113,6 +173,28 @@ public class DeviceHotplugTests
 
         Assert.Empty(service.MissingStoredDevices);
         Assert.Same(rgbDevice, Assert.Single(service.Devices).RgbDevice);
+    }
+
+    [Fact]
+    public void StoredMissingDeviceWithReplacementRuntimeIdentityIsClaimedBySignature()
+    {
+        DeviceEntity stored = CreateEntity("test:runtime-path-a");
+        stored.DeviceProvider = TestArtemisProvider.PluginId;
+        stored.ReconnectionSignature = "same-physical-device";
+        IDeviceRepository repository = Substitute.For<IDeviceRepository>();
+        repository.GetAll().Returns([stored]);
+        DeviceService service = CreateDeviceService(repository);
+        repository.Get(Arg.Any<string>()).Returns((DeviceEntity?) null);
+
+        TestRgbDevice replacement = new("runtime-path-b", "same-physical-device");
+        service.AddDeviceProvider(new TestArtemisProvider(new TestRgbProvider(replacement)) {IsEnabled = true});
+
+        ArtemisDevice device = Assert.Single(service.Devices);
+        Assert.Same(stored, device.DeviceEntity);
+        Assert.Equal("test:runtime-path-b", device.Identifier);
+        Assert.True(device.MatchesIdentifier("test:runtime-path-a"));
+        Assert.Contains("test:runtime-path-b", stored.IdentifierAliases);
+        repository.DidNotReceive().Add(Arg.Any<DeviceEntity>());
     }
 
     [Fact]
@@ -439,6 +521,7 @@ public class DeviceHotplugTests
 
         public override IRGBDeviceProvider RgbDeviceProvider => _rgbProvider;
         public override string GetDeviceIdentifier(IRGBDevice device) => $"test:{((TestDeviceInfo) device.DeviceInfo).StableId}";
+        public override string? GetReconnectionSignature(IRGBDevice device) => ((TestDeviceInfo) device.DeviceInfo).ReconnectionSignature;
         public override string? GetParentDeviceIdentifier(string deviceIdentifier)
         {
             int separatorIndex = deviceIdentifier.LastIndexOf('|');
@@ -472,11 +555,18 @@ public class DeviceHotplugTests
             for (int index = 0; index < ledIds.Length; index++)
                 AddLed(ledIds[index], new Point(index * 10, 0), new Size(10, 10));
         }
+
+        public TestRgbDevice(string stableId, string reconnectionSignature)
+            : base(new TestDeviceInfo(stableId, reconnectionSignature), new TestUpdateQueue())
+        {
+            AddLed(LedId.LedStripe1, new Point(0, 0), new Size(10, 10));
+        }
     }
 
-    private sealed class TestDeviceInfo(string stableId) : IRGBDeviceInfo
+    private sealed class TestDeviceInfo(string stableId, string? reconnectionSignature = null) : IRGBDeviceInfo
     {
         public string StableId { get; } = stableId;
+        public string ReconnectionSignature { get; } = reconnectionSignature ?? stableId;
         public RGBDeviceType DeviceType => RGBDeviceType.LedStripe;
         public string DeviceName => "Identical test device";
         public string Manufacturer => "Test";
