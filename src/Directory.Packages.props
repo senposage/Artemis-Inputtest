@@ -68,5 +68,8 @@
     <PackageVersion Include="System.Text.Json" Version="10.0.1" />
     <PackageVersion Include="TextMateSharp.Grammars" Version="2.0.2" />
     <PackageVersion Include="HotAvalonia" Version="3.0.2" />
+    <PackageVersion Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageVersion Include="xunit" Version="2.9.3" />
+    <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
   </ItemGroup>
 </Project>
